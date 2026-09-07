@@ -1,0 +1,45 @@
+# ── Environment ──────────────────────────────────────
+.env
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Data & Models (too large for git) ────────────────
+data/retail.db
+data/train.csv
+models/*.pkl
+models/*.joblib
+
+# ── Jupyter ───────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDE ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Streamlit cache ───────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Logs ─────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test coverage ─────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ── Lock files (keep requirements.txt instead) ────────
+Pipfile.lock
