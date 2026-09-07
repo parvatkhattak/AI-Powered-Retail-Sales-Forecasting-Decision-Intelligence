@@ -15,6 +15,8 @@ Run this script once before starting the app:
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 import sys
 
@@ -38,7 +40,7 @@ def load_raw_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 def merge_datasets(train: pd.DataFrame, store: pd.DataFrame) -> pd.DataFrame:
     """Left-join train on store using Store column."""
     # TODO (Himanshu): Implement merge and validate row count
-    df = train.merge(store, on="Store", how="left")
+    df = train.merge(store, on="Store", how="left", validate="many_to_one")
     assert len(df) == len(train), "Row count mismatch after merge!"
     print(f"   ✅ Merged: {len(df):,} rows")
     return df
@@ -54,11 +56,49 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     - Normalise StateHoliday types
     - Encode PromoInterval
     """
-    # TODO (Himanshu): Implement full cleaning logic per data_assumptions.md
+    
+    # Store original row count before cleaning
+    before = len(df)
     df = df[df["Open"] == 1].copy()
     df["CompetitionDistance"].fillna(df["CompetitionDistance"].median(), inplace=True)
-    df["StateHoliday"] = df["StateHoliday"].astype(str).replace("0", "no_holiday")
-    print(f"   ✅ Cleaned: {len(df):,} rows (removed closed-store days)")
+    
+    for col in ["CompetitionOpenSinceMonth", "CompetitionOpenSinceYear"]:
+        if col in df.columns:
+                df[col] = df[col].fillna(0)
+                
+    for col in ["Promo2SinceWeek", "Promo2SinceYear"]:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+            
+    df["StateHoliday"] = df["StateHoliday"].astype(str).replace(
+        {"0": "no_holiday", "0.0": "no_holiday"}
+    )
+    if "PromoInterval" in df.columns and "Date" in df.columns:
+        df["PromoInterval"] = (
+            df["PromoInterval"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        month_map = {
+            1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+            7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+        }
+        row_month_name = df["Date"].dt.month.map(month_map)
+        df["IsPromoMonth"] = [
+            int(
+                m in [x.strip() for x in interval.split(",")]
+            )
+            for m, interval in zip(
+                row_month_name,
+                df["PromoInterval"]
+            )
+        ]
+    else:
+        df["IsPromoMonth"] = 0
+ 
+    print(f"   ✅ Cleaned: {len(df):,} rows (removed {before - len(df):,} closed-store days)")
+    
     return df
 
 
@@ -89,7 +129,28 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def assign_store_clusters(df: pd.DataFrame) -> pd.DataFrame:
     """Cluster stores by sales behaviour using KMeans."""
-    # TODO (Himanshu): Implement KMeans clustering on aggregated store features
+    n_clusters = N_CLUSTERS
+ 
+    store_features = (
+        df.groupby("Store")
+        .agg(
+            avg_sales=("Sales", "mean"),
+            avg_customers=("Customers", "mean") if "Customers" in df.columns else ("Sales", "mean"),
+            sales_std=("Sales", "std"),
+            promo_frequency=("Promo", "mean") if "Promo" in df.columns else ("Sales", "mean"),
+        )
+        .fillna(0)
+        .reset_index()
+    )
+ 
+    feature_cols = ["avg_sales", "avg_customers", "sales_std", "promo_frequency"]
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(store_features[feature_cols])
+ 
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    store_features["StoreCluster"] = kmeans.fit_predict(scaled)
+ 
+    df = df.merge(store_features[["Store", "StoreCluster"]], on="Store", how="left")
     print(f"   ✅ Store clusters assigned (K={N_CLUSTERS})")
     return df
 
@@ -98,9 +159,17 @@ def assign_store_clusters(df: pd.DataFrame) -> pd.DataFrame:
 
 def flag_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     """Flag daily sales rows with Z-score > ANOMALY_ZSCORE as anomalous."""
-    # TODO (Himanshu): Implement Z-score anomaly flagging per store
-    df["is_anomaly"] = 0
-    print(f"   ✅ Anomaly flags added (threshold z={ANOMALY_ZSCORE})")
+    z_threshold = ANOMALY_ZSCORE
+ 
+    store_mean = df.groupby("Store")["Sales"].transform("mean")
+    store_std = df.groupby("Store")["Sales"].transform("std").replace(0, np.nan)
+ 
+    z_scores = (df["Sales"] - store_mean) / store_std
+    df["sales_zscore"] = z_scores.fillna(0)
+    df["is_anomaly"] = (df["sales_zscore"].abs() > z_threshold).astype(int)
+ 
+    n_flagged = int(df["is_anomaly"].sum())
+    print(f"   ✅ Anomaly flags added (threshold z={z_threshold}) — {n_flagged:,} rows flagged")
     return df
 
 
