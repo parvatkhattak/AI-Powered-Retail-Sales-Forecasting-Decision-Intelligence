@@ -1,6 +1,6 @@
 """
 src/prompts.py
-Owner: Dev 4 — Agentic AI Engineer
+Owner: Saumya — Agentic AI Engineer
 
 Responsibilities:
 - Store all system prompts for the LangGraph agent
@@ -17,4 +17,4 @@ You are a retail data analyst. Use only the provided tool data.
 ...
 """
 
-# TODO (Dev 4): Define detailed prompts
+# TODO (Saumya): Define detailed prompts

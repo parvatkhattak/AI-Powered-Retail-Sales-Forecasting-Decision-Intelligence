@@ -1,6 +1,6 @@
 """
 src/agent_graph.py
-Owner: Dev 4 — Agentic AI Engineer
+Owner: Saumya — Agentic AI Engineer
 
 Responsibilities:
 - Define LangGraph state and nodes
@@ -13,12 +13,12 @@ from typing import Generator
 
 def run_agent(user_query: str, session_id: str = "default") -> str:
     """Synchronous agent call."""
-    # TODO (Dev 4): Implement full LangGraph execution
+    # TODO (Saumya): Implement full LangGraph execution
     return f"MOCK: Here is a simulated response for query: '{user_query}'"
 
 def run_agent_stream(user_query: str, session_id: str = "default") -> Generator[str, None, None]:
     """Streaming version for Streamlit chat UI."""
-    # TODO (Dev 4): Implement streaming LangGraph execution
+    # TODO (Saumya): Implement streaming LangGraph execution
     mock_chunks = ["Observation: ", "Store 200 is down 18%. ", "\nRecommendation: ", "Run Promo 1."]
     for chunk in mock_chunks:
         yield chunk

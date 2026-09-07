@@ -14,17 +14,17 @@
 - pytest (testing)
 
 ## Module Ownership — Do Not Edit Other Devs' Core Files Without Permission
-- src/data_pipeline.py → Dev 2
-- src/database.py → Dev 2
-- src/model_engine.py → Dev 3
-- src/feature_engineering.py → Dev 3
-- src/agent_graph.py → Dev 4
-- src/decision_engine.py → Dev 4
-- src/prompts.py → Dev 4
-- pages/ → Dev 5
-- components/ → Dev 5
-- app.py → Dev 1
-- config.py → Dev 1
+- src/data_pipeline.py → Himanshu
+- src/database.py → Himanshu
+- src/model_engine.py → Ashutosh
+- src/feature_engineering.py → Ashutosh
+- src/agent_graph.py → Saumya
+- src/decision_engine.py → Saumya
+- src/prompts.py → Saumya
+- pages/ → Dikshit
+- components/ → Dikshit
+- app.py → Parvat
+- config.py → Parvat
 
 ## Code Style
 - Use strict Python type hints on all function parameters and return types

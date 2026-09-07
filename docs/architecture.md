@@ -1,7 +1,7 @@
 # 🏛️ Master Architecture Document
 ## Retail AI — Sales Forecasting & Decision Intelligence Platform
 
-> **Version:** 1.0 | **Authors:** Dev 1 (Lead) + Team | **Status:** Reference Document
+> **Version:** 1.0 | **Authors:** Parvat (Lead) + Team | **Status:** Reference Document
 
 ---
 
@@ -64,7 +64,7 @@ graph TD
         RAW2[store.csv\n1115 stores]
     end
 
-    subgraph DATA["🗄️ Data Layer  —  Dev 2"]
+    subgraph DATA["🗄️ Data Layer  —  Himanshu"]
         PIPE[data_pipeline.py\nClean · Merge · Feature Engineer]
         DB[(retail.db\nSQLite Database)]
         DBAPI[database.py\nQuery API]
@@ -72,7 +72,7 @@ graph TD
         DB --> DBAPI
     end
 
-    subgraph ML["🤖 ML Layer  —  Dev 3"]
+    subgraph ML["🤖 ML Layer  —  Ashutosh"]
         FEAT[feature_engineering.py\nLags · Rolling · Calendar]
         TRAIN[model_engine.py\nXGBoost · LightGBM · SHAP]
         MDLS[(models/\n.pkl files)]
@@ -81,7 +81,7 @@ graph TD
         MDLS --> TRAIN
     end
 
-    subgraph AGENT["🧠 Agent Layer  —  Dev 4"]
+    subgraph AGENT["🧠 Agent Layer  —  Saumya"]
         ROUTER[Router Node\nClassifies intent]
         ANALYST[Data Analyst Node\nHistorical queries]
         FORECAST[Forecast Node\n7-day prediction]
@@ -97,7 +97,7 @@ graph TD
         PROMPTS --> LLM
     end
 
-    subgraph UI["🎨 Application Layer  —  Dev 5 + Dev 1"]
+    subgraph UI["🎨 Application Layer  —  Dikshit + Parvat"]
         APP[app.py\nStreamlit Entry Point]
         P1[Dashboard Page]
         P2[Forecasting Page]
@@ -111,7 +111,7 @@ graph TD
         APP --> P5
     end
 
-    subgraph CONFIG["⚙️ Shared Config  —  Dev 1"]
+    subgraph CONFIG["⚙️ Shared Config  —  Parvat"]
         CFG[config.py]
     end
 
@@ -141,16 +141,16 @@ The system is divided into **4 horizontal layers**. Each layer is independent an
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  LAYER 4: APPLICATION LAYER                                     │
-│  Streamlit (app.py + 5 pages)          ← Dev 5 + Dev 1         │
+│  Streamlit (app.py + 5 pages)          ← Dikshit + Parvat         │
 │  What the user sees and interacts with                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  LAYER 3: INTELLIGENCE LAYER                                    │
-│  LangGraph Agent + Decision Engine     ← Dev 4                  │
+│  LangGraph Agent + Decision Engine     ← Saumya                  │
 │  Understands questions, routes, calls tools, builds answers     │
 ├────────────────────────┬────────────────────────────────────────┤
 │  LAYER 2a: ML LAYER    │  LAYER 2b: DATA LAYER                  │
 │  model_engine.py       │  database.py                           │
-│  ← Dev 3               │  ← Dev 2                               │
+│  ← Ashutosh               │  ← Himanshu                               │
 │  Forecasts + SHAP      │  Historical queries + EDA              │
 ├────────────────────────┴────────────────────────────────────────┤
 │  LAYER 1: STORAGE LAYER                                         │
@@ -826,5 +826,5 @@ compare_stores_report(store_ids: list[int]) -> dict
 
 ---
 
-*Document maintained by: Dev 1 (Team Lead)*
+*Document maintained by: Parvat (Team Lead)*
 *All diagrams are rendered in Mermaid. View in GitHub or any Mermaid-compatible markdown renderer.*

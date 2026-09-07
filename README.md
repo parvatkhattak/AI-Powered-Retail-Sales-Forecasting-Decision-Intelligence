@@ -57,11 +57,11 @@ Historical EDA  →  7-day XGBoost  →  SHAP drivers  →  Action + Evidence
 
 | Name | Role | Responsible For |
 |------|------|----------------|
-| **Dev 1** | Team Lead & Integration | `app.py`, `config.py`, system integration, tests |
-| **Dev 2** | Data Engineer & EDA | `data_pipeline.py`, `database.py`, EDA notebook |
-| **Dev 3** | ML & Explainability | `model_engine.py`, XGBoost, SHAP |
-| **Dev 4** | Agentic AI & Decision | `agent_graph.py`, `decision_engine.py`, LLM prompts |
-| **Dev 5** | Frontend & UI | All Streamlit pages, charts, components |
+| **Parvat** | Team Lead & Integration | `app.py`, `config.py`, system integration, tests |
+| **Himanshu** | Data Engineer & EDA | `data_pipeline.py`, `database.py`, EDA notebook |
+| **Ashutosh** | ML & Explainability | `model_engine.py`, XGBoost, SHAP |
+| **Saumya** | Agentic AI & Decision | `agent_graph.py`, `decision_engine.py`, LLM prompts |
+| **Dikshit** | Frontend & UI | All Streamlit pages, charts, components |
 
 ---
 
@@ -483,10 +483,10 @@ improving trends.
 ### Branch Naming
 
 ```bash
-git checkout -b feature/data-pipeline    # Dev 2
-git checkout -b feature/ml-engine        # Dev 3
-git checkout -b feature/agent-router     # Dev 4
-git checkout -b feature/streamlit-ui     # Dev 5
+git checkout -b feature/data-pipeline    # Himanshu
+git checkout -b feature/ml-engine        # Ashutosh
+git checkout -b feature/agent-router     # Saumya
+git checkout -b feature/streamlit-ui     # Dikshit
 ```
 
 ### Before Raising a PR
@@ -499,7 +499,7 @@ pytest tests/test_<your_module>.py -v
 python -c "from src.<your_module> import *; print('OK')"
 ```
 
-### Never Change a Shared Function Signature Without Asking Dev 1 First
+### Never Change a Shared Function Signature Without Asking Parvat First
 
 The following functions are called by multiple team members. Changing them without coordination will break everyone's code:
 

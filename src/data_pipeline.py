@@ -1,6 +1,6 @@
 """
 src/data_pipeline.py
-Owner: Dev 2 — Data Engineer
+Owner: Himanshu — Data Engineer
 
 Responsibilities:
 - Load and merge train.csv + store.csv
@@ -37,7 +37,7 @@ def load_raw_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def merge_datasets(train: pd.DataFrame, store: pd.DataFrame) -> pd.DataFrame:
     """Left-join train on store using Store column."""
-    # TODO (Dev 2): Implement merge and validate row count
+    # TODO (Himanshu): Implement merge and validate row count
     df = train.merge(store, on="Store", how="left")
     assert len(df) == len(train), "Row count mismatch after merge!"
     print(f"   ✅ Merged: {len(df):,} rows")
@@ -54,7 +54,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     - Normalise StateHoliday types
     - Encode PromoInterval
     """
-    # TODO (Dev 2): Implement full cleaning logic per data_assumptions.md
+    # TODO (Himanshu): Implement full cleaning logic per data_assumptions.md
     df = df[df["Open"] == 1].copy()
     df["CompetitionDistance"].fillna(df["CompetitionDistance"].median(), inplace=True)
     df["StateHoliday"] = df["StateHoliday"].astype(str).replace("0", "no_holiday")
@@ -68,7 +68,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Create all model features. Delegates to feature_engineering.py.
     """
-    # TODO (Dev 2 + Dev 3): Call feature_engineering functions here
+    # TODO (Himanshu + Ashutosh): Call feature_engineering functions here
     from src.feature_engineering import (
         add_date_features,
         add_lag_features,
@@ -89,7 +89,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def assign_store_clusters(df: pd.DataFrame) -> pd.DataFrame:
     """Cluster stores by sales behaviour using KMeans."""
-    # TODO (Dev 2): Implement KMeans clustering on aggregated store features
+    # TODO (Himanshu): Implement KMeans clustering on aggregated store features
     print(f"   ✅ Store clusters assigned (K={N_CLUSTERS})")
     return df
 
@@ -98,7 +98,7 @@ def assign_store_clusters(df: pd.DataFrame) -> pd.DataFrame:
 
 def flag_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     """Flag daily sales rows with Z-score > ANOMALY_ZSCORE as anomalous."""
-    # TODO (Dev 2): Implement Z-score anomaly flagging per store
+    # TODO (Himanshu): Implement Z-score anomaly flagging per store
     df["is_anomaly"] = 0
     print(f"   ✅ Anomaly flags added (threshold z={ANOMALY_ZSCORE})")
     return df
@@ -108,7 +108,7 @@ def flag_anomalies(df: pd.DataFrame) -> pd.DataFrame:
 
 def write_to_sqlite(df: pd.DataFrame) -> None:
     """Write cleaned + featured data to SQLite database."""
-    # TODO (Dev 2): Write sales and stores tables; add indexes
+    # TODO (Himanshu): Write sales and stores tables; add indexes
     engine = create_engine(f"sqlite:///{DB_PATH}")
     df.to_sql("sales", engine, if_exists="replace", index=False)
     print(f"   ✅ Written to {DB_PATH}")
