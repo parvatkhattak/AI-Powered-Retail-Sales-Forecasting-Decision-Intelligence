@@ -235,10 +235,10 @@ def get_store_cluster(store_id: int) -> dict:
     with engine.connect() as conn:
         df = pd.read_sql(query, conn, params={"store_id": store_id})
  
-    if df.empty or pd.isna(df["StoreCluster"].iloc[0]):
+    if df.empty or pd.isna(df["store_cluster"].iloc[0]):
         return {}
  
-    cluster_id = int(df["StoreCluster"].iloc[0])
+    cluster_id = int(df["store_cluster"].iloc[0])
  
     ranking_query = text("""
         SELECT store_cluster, AVG(Sales) AS avg_sales
