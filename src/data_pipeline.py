@@ -148,9 +148,9 @@ def assign_store_clusters(df: pd.DataFrame) -> pd.DataFrame:
     scaled = scaler.fit_transform(store_features[feature_cols])
  
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    store_features["StoreCluster"] = kmeans.fit_predict(scaled)
+    store_features["store_cluster"] = kmeans.fit_predict(scaled)
  
-    df = df.merge(store_features[["Store", "StoreCluster"]], on="Store", how="left")
+    df = df.merge(store_features[["Store", "store_cluster"]], on="Store", how="left")
     print(f"   ✅ Store clusters assigned (K={N_CLUSTERS})")
     return df
 
