@@ -1,0 +1,7 @@
+{
+  "Promo": {"value": 1450.50, "direction": "positive"},
+  "Sales_lag_7": {"value": 820.30, "direction": "positive"},
+  "CompetitionDistance": {"value": -310.20, "direction": "negative"},
+  "DayOfWeek": {"value": -180.40, "direction": "negative"},
+  "StoreType": {"value": 120.10, "direction": "positive"}
+}
