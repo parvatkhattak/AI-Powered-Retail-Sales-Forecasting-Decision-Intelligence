@@ -15,6 +15,8 @@ Run this script once before starting the app:
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
+import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from pathlib import Path
@@ -172,8 +174,476 @@ def flag_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     print(f"   ✅ Anomaly flags added (threshold z={z_threshold}) — {n_flagged:,} rows flagged")
     return df
 
-
-# ── 7. Write to SQLite ─────────────────────────────────────────────────────────
+# ── 7. Create Visualizations ──────────────────────────────────────────────────
+def create_visualizations(df: pd.DataFrame) -> None:
+    """
+    Create EDA visualizations directly from the processed DataFrame.
+ 
+    Visualizations are generated from the CSV data after cleaning,
+    feature engineering, clustering and anomaly detection.
+ 
+    No API calls are used.
+    """
+ 
+    print("\n📊 Creating visualizations...")
+ 
+    # Create output directory
+    visualization_dir = Path(__file__).resolve().parent.parent / "visualizations"
+    visualization_dir.mkdir(parents=True, exist_ok=True)
+ 
+    # Only analyze open stores (defensive: "Open" may have been dropped as a
+    # constant column by feature_engineering.py, since every remaining row is
+    # already Open == 1 by this point in the pipeline)
+    analysis_df = df[df["Open"] == 1].copy() if "Open" in df.columns else df.copy()
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 1. Daily Sales
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    daily_sales = (
+        analysis_df
+        .groupby("Date", as_index=False)
+        .agg(
+            total_sales=("Sales", "sum"),
+            avg_sales=("Sales", "mean"),
+        )
+        .sort_values("Date")
+    )
+ 
+    fig = px.line(
+        daily_sales,
+        x="Date",
+        y="total_sales",
+        title="Daily Total Sales",
+        labels={
+            "Date": "Date",
+            "total_sales": "Total Sales",
+        },
+    )
+ 
+    fig.update_layout(hovermode="x unified")
+ 
+    fig.write_image(
+        visualization_dir / "01_daily_sales.png"
+    )
+       # ────────────────────────────────────────────────────────────────────────
+    # 2. Monthly Sales
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    monthly_sales = (
+        analysis_df
+        .assign(
+            month=analysis_df["Date"]
+            .dt
+            .to_period("M")
+            .astype(str)
+        )
+        .groupby("month", as_index=False)
+        .agg(
+            total_sales=("Sales", "sum"),
+            avg_sales=("Sales", "mean"),
+        )
+        .sort_values("month")
+    )
+ 
+    fig = px.bar(
+        monthly_sales,
+        x="month",
+        y="total_sales",
+        title="Monthly Total Sales",
+        labels={
+            "month": "Month",
+            "total_sales": "Total Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "02_monthly_sales.png"
+    )
+    # ────────────────────────────────────────────────────────────────────────
+    # 3. Day of Week Sales
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    weekday_sales = (
+        analysis_df
+        .groupby("DayOfWeek", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+            avg_customers=("Customers", "mean"),
+        )
+        .sort_values("DayOfWeek")
+    )
+ 
+    day_names = {
+        1: "Monday",
+        2: "Tuesday",
+        3: "Wednesday",
+        4: "Thursday",
+        5: "Friday",
+        6: "Saturday",
+        7: "Sunday",
+    }
+ 
+    weekday_sales["day_name"] = (
+        weekday_sales["DayOfWeek"].map(day_names)
+    )
+ 
+    fig = px.bar(
+        weekday_sales,
+        x="day_name",
+        y="avg_sales",
+        title="Average Sales by Day of Week",
+        labels={
+            "day_name": "Day",
+            "avg_sales": "Average Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "03_weekday_sales.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 4. Store Performance
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    store_performance = (
+        analysis_df
+        .groupby("Store", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+        )
+        .sort_values(
+            "avg_sales",
+            ascending=False
+        )
+        .head(20)
+    )
+ 
+    store_performance["Store"] = (
+        store_performance["Store"].astype(str)
+    )
+ 
+    fig = px.bar(
+        store_performance,
+        x="Store",
+        y="avg_sales",
+        title="Top 20 Stores by Average Daily Sales",
+        labels={
+            "Store": "Store",
+            "avg_sales": "Average Daily Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "04_store_performance.png"
+    )
+    # ────────────────────────────────────────────────────────────────────────
+    # 5. Store Type
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    store_type = (
+        analysis_df
+        .groupby("StoreType", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+            avg_customers=("Customers", "mean"),
+        )
+    )
+ 
+    fig = px.bar(
+        store_type,
+        x="StoreType",
+        y="avg_sales",
+        title="Average Sales by Store Type",
+        labels={
+            "StoreType": "Store Type",
+            "avg_sales": "Average Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "05_store_type.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 6. Promotion Analysis
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    promo = (
+        analysis_df
+        .groupby("Promo", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+            avg_customers=("Customers", "mean"),
+        )
+    )
+ 
+    promo["promo_label"] = promo["Promo"].map({
+        0: "No Promotion",
+        1: "Promotion",
+    })
+ 
+    fig = px.bar(
+        promo,
+        x="promo_label",
+        y="avg_sales",
+        title="Average Sales: Promotion vs No Promotion",
+        labels={
+            "promo_label": "Promotion Status",
+            "avg_sales": "Average Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "06_promotion.png"
+    )
+    # ────────────────────────────────────────────────────────────────────────
+    # 7. Promotion Uplift
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    promo_sales = (
+        analysis_df[analysis_df["Promo"] == 1]
+        .groupby("Store")["Sales"]
+        .mean()
+    )
+ 
+    non_promo_sales = (
+        analysis_df[analysis_df["Promo"] == 0]
+        .groupby("Store")["Sales"]
+        .mean()
+    )
+ 
+    promo_uplift = pd.DataFrame({
+        "promo_avg_sales": promo_sales,
+        "non_promo_avg_sales": non_promo_sales,
+    }).dropna()
+ 
+    promo_uplift["uplift_pct"] = (
+        (
+            promo_uplift["promo_avg_sales"]
+            - promo_uplift["non_promo_avg_sales"]
+        )
+        / promo_uplift["non_promo_avg_sales"]
+        * 100
+    )
+ 
+    promo_uplift = (
+        promo_uplift
+        .reset_index()
+        .sort_values(
+            "uplift_pct",
+            ascending=False
+        )
+        .head(20)
+    )
+ 
+    promo_uplift["Store"] = (
+        promo_uplift["Store"].astype(str)
+    )
+ 
+    fig = px.bar(
+        promo_uplift,
+        x="Store",
+        y="uplift_pct",
+        title="Top 20 Stores by Promotional Sales Uplift",
+        labels={
+            "Store": "Store",
+            "uplift_pct": "Sales Uplift (%)",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "07_promo_uplift.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 8. Assortment
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    assortment = (
+        analysis_df
+        .groupby("Assortment", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+            avg_customers=("Customers", "mean"),
+        )
+    )
+ 
+    fig = px.bar(
+        assortment,
+        x="Assortment",
+        y="avg_sales",
+        title="Average Sales by Assortment Type",
+        labels={
+            "Assortment": "Assortment",
+            "avg_sales": "Average Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "08_assortment.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 9. Holiday Analysis
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    holiday = (
+        analysis_df
+        .groupby("StateHoliday", as_index=False)
+        .agg(
+            avg_sales=("Sales", "mean"),
+            total_sales=("Sales", "sum"),
+            avg_customers=("Customers", "mean"),
+        )
+    )
+ 
+    fig = px.bar(
+        holiday,
+        x="StateHoliday",
+        y="avg_sales",
+        title="Average Sales by Holiday Type",
+        labels={
+            "StateHoliday": "Holiday Type",
+            "avg_sales": "Average Sales",
+        },
+    )
+ 
+    fig.write_image(
+        visualization_dir / "09_holiday.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 10. Competition Distance vs Sales
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    competition = (
+        analysis_df
+        .groupby("Store", as_index=False)
+        .agg(
+            competition_distance=(
+                "CompetitionDistance",
+                "first",
+            ),
+            avg_sales=("Sales", "mean"),
+        )
+        .dropna()
+    )
+ 
+    fig = px.scatter(
+        competition,
+        x="competition_distance",
+        y="avg_sales",
+        title="Competition Distance vs Average Sales",
+        labels={
+            "competition_distance": "Competition Distance",
+            "avg_sales": "Average Sales",
+        },
+        hover_data=["Store"],
+    )
+ 
+    fig.write_image(
+        visualization_dir / "10_competition.png"
+    )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 11. Store Clusters
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    if "store_cluster" in analysis_df.columns:
+ 
+        clusters = (
+            analysis_df
+            .groupby("store_cluster", as_index=False)
+            .agg(
+                avg_sales=("Sales", "mean"),
+                avg_customers=("Customers", "mean"),
+                store_count=("Store", "nunique"),
+            )
+        )
+ 
+        fig = px.scatter(
+            clusters,
+            x="avg_customers",
+            y="avg_sales",
+            size="store_count",
+            text="store_cluster",
+            title="Store Clusters",
+            labels={
+                "avg_customers": "Average Customers",
+                "avg_sales": "Average Sales",
+                "store_cluster": "Cluster",
+            },
+        )
+ 
+        fig.write_image(
+            visualization_dir / "11_clusters.png"
+        )
+ 
+    # ────────────────────────────────────────────────────────────────────────
+    # 12. Anomaly Detection
+    # ────────────────────────────────────────────────────────────────────────
+ 
+    if "is_anomaly" in analysis_df.columns:
+ 
+        daily = (
+            analysis_df
+            .groupby("Date", as_index=False)
+            .agg(
+                total_sales=("Sales", "sum"),
+                anomaly_count=("is_anomaly", "sum"),
+            )
+            .sort_values("Date")
+        )
+ 
+        fig = px.line(
+            daily,
+            x="Date",
+            y="total_sales",
+            title="Daily Sales and Anomalies",
+            labels={
+                "Date": "Date",
+                "total_sales": "Total Sales",
+            },
+        )
+ 
+        anomalies = daily[
+            daily["anomaly_count"] > 0
+        ]
+ 
+        if not anomalies.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=anomalies["Date"],
+                    y=anomalies["total_sales"],
+                    mode="markers",
+                    name="Anomalous Days",
+                    text=anomalies["anomaly_count"],
+                    hovertemplate=(
+                        "Date: %{x}<br>"
+                        "Sales: %{y}<br>"
+                        "Anomalous rows: %{text}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+ 
+        fig.write_image(
+            visualization_dir / "12_anomalies.png"
+        )
+ 
+    print(
+        f"   ✅ Visualizations saved to: "
+        f"{visualization_dir}"
+    )
+    
+# ── 8. Write to SQLite ─────────────────────────────────────────────────────────
 
 def write_to_sqlite(df: pd.DataFrame) -> None:
     """Write cleaned + featured data to SQLite database."""
@@ -200,6 +670,7 @@ def run_pipeline() -> None:
     df = assign_store_clusters(df)
     df = flag_anomalies(df)
     write_to_sqlite(df)
+    create_visualizations(df)
     print("\n✅ Pipeline complete! retail.db is ready.\n")
 
 
