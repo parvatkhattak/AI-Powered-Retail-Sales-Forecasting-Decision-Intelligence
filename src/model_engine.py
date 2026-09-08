@@ -313,7 +313,17 @@ def _recursive_forecast(ctx, model, feature_cols, medians, val_rmspe=None):
 def get_7day_forecast(store_id: int) -> pd.DataFrame:
     """Returns a 7-row DataFrame: Date, PredictedSales, LowerBound, UpperBound."""
     if USE_MOCKS:
-        return pd.DataFrame([{"date": "2015-08-01", "predicted_sales": 6500, "lower": 6000, "upper": 7000}])
+        with open(MOCK_FORECAST) as f:
+            rows = json.load(f)
+        return pd.DataFrame([
+            {
+                "Date": r["date"],
+                "PredictedSales": r["predicted_sales"],
+                "LowerBound": r["lower"],
+                "UpperBound": r["upper"],
+            }
+            for r in rows
+        ])
 
     model, feature_cols, medians, val_rmspe = _get_artifacts()
     ctx = _forecast_context(store_id)
@@ -326,7 +336,8 @@ def get_shap_explanations(store_id: int) -> dict:
     """Returns top 5 SHAP drivers: {feature_name: {shap_value, direction}} for
     this store's very next trading day."""
     if USE_MOCKS:
-        return {"Promo": {"value": 1500, "direction": "positive"}}
+        with open(MOCK_SHAP) as f:
+            return json.load(f)
 
     model, feature_cols, medians, _ = _get_artifacts()
     ctx = _forecast_context(store_id)
@@ -352,7 +363,17 @@ def get_baseline_comparison(store_id: int) -> pd.DataFrame:
     Baseline_MovingAvg (a naive 'assume it continues like the last 7 trading
     days' forecast, held flat across the whole window)."""
     if USE_MOCKS:
-        return pd.DataFrame([{"date": "2015-08-01", "baseline": 6000, "ml_model": 6500}])
+        with open(MOCK_FORECAST) as f:
+            rows = json.load(f)
+        return pd.DataFrame([
+            {
+                "Date": r["date"],
+                "LightGBM": r["predicted_sales"],
+                "XGBoost": r["predicted_sales"],
+                "Baseline_MovingAvg": r["lower"],
+            }
+            for r in rows
+        ])
 
     lgbm_model, feature_cols, medians, _ = _get_artifacts()
     xgb_model = joblib.load(MODEL_PATH)
@@ -385,7 +406,11 @@ def get_whatif_forecast(store_id: int, promo_override: bool) -> pd.DataFrame:
     window — including PromoStreak/DaysSinceLastPromo/DaysUntilNextPromo,
     which get recomputed against the simulated Promo calendar, not the real one."""
     if USE_MOCKS:
-        return pd.DataFrame([{"date": "2015-08-01", "predicted_sales": 7200 if promo_override else 6100}])
+        base = 7200 if promo_override else 6100
+        return pd.DataFrame([{
+            "Date": "2015-08-01", "PredictedSales": base,
+            "LowerBound": round(base * 0.9), "UpperBound": round(base * 1.1),
+        }])
 
     model, feature_cols, medians, val_rmspe = _get_artifacts()
     ctx = _forecast_context(store_id, promo_override=int(promo_override))
@@ -399,7 +424,17 @@ def get_shap_waterfall_data(store_id: int) -> dict:
     every feature (not just the top 5), plus the base value and final prediction,
     everything a waterfall chart needs to render."""
     if USE_MOCKS:
-        return {"base_value": 8.5, "features": [{"name": "Promo", "value": 1, "shap_value": 0.3}], "prediction": 8.8}
+        with open(MOCK_SHAP) as f:
+            shap_mock = json.load(f)
+        return {
+            "date": "2015-08-01",
+            "base_value_sales": 5000.0,
+            "predicted_sales": 6500.0,
+            "features": [
+                {"name": name, "value": 1, "shap_value": info["value"]}
+                for name, info in shap_mock.items()
+            ],
+        }
 
     model, feature_cols, medians, _ = _get_artifacts()
     ctx = _forecast_context(store_id)

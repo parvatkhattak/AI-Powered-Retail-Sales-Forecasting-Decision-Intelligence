@@ -13,10 +13,10 @@ shap>=0.44
 optuna>=3.0
 
 # AI / Agents
-langchain>=0.2
-langgraph>=0.1
-langchain-openai>=0.1
-openai>=1.0
+langchain==1.4.0
+langgraph==1.2.11
+langchain-openrouter==0.2.8
+pydantic==2.13.5
 
 # Visualization & App
 streamlit>=1.35
@@ -29,8 +29,8 @@ reportlab>=4.0
 kaleido>=0.2
 
 # Dev & Testing
-pytest>=8.0
+pytest==9.1.1
 pytest-cov>=4.0
 jupyter>=1.0
 ipykernel>=6.0
-python-dotenv>=1.0
+python-dotenv==1.2.3
