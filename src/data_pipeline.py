@@ -59,7 +59,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     
     # Store original row count before cleaning
     before = len(df)
-    df = df[df["Open"] == 1].copy()
+    df = df[(df["Open"] == 1) & (df["Sales"] > 0)].copy()
     df["CompetitionDistance"].fillna(df["CompetitionDistance"].median(), inplace=True)
     
     for col in ["CompetitionOpenSinceMonth", "CompetitionOpenSinceYear"]:

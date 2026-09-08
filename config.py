@@ -35,7 +35,7 @@ LLM_TEMPERATURE = 0.1                                  # Low temperature = more 
 
 # ── Model Hyperparameters ──────────────────────────────────────────────────────
 FORECAST_DAYS   = 7
-LAG_DAYS        = [7, 14, 28, 365]
+LAG_DAYS        = [7, 14, 28]
 ROLLING_WINDOWS = [7, 14, 28]
 N_CLUSTERS      = 4          # KMeans clusters for store grouping
 ANOMALY_ZSCORE  = 2.5        # Z-score threshold for anomaly flagging
