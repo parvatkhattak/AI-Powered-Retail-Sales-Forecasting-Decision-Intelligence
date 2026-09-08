@@ -13,7 +13,6 @@ build/
 
 # ── Data & Models (too large for git) ────────────────
 data/retail.db
-data/train.csv
 models/*.pkl
 models/*.joblib
 
