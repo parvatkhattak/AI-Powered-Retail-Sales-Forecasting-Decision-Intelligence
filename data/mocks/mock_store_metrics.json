@@ -1,0 +1,8 @@
+[
+  {"store_id": 100, "date": "2025-09-01", "sales": 6500, "customers": 580, "promo": 1},
+  {"store_id": 100, "date": "2025-09-02", "sales": 6200, "customers": 550, "promo": 1},
+  {"store_id": 100, "date": "2025-09-03", "sales": 4100, "customers": 420, "promo": 0},
+  {"store_id": 200, "date": "2025-09-01", "sales": 3200, "customers": 310, "promo": 1},
+  {"store_id": 200, "date": "2025-09-02", "sales": 2900, "customers": 290, "promo": 0},
+  {"store_id": 300, "date": "2025-09-01", "sales": 8900, "customers": 810, "promo": 1}
+]
