@@ -1,0 +1,62 @@
+[
+  {
+    "period": "2024-01",
+    "total_sales": 163611,
+    "avg_sales": 6762
+  },
+  {
+    "period": "2024-02",
+    "total_sales": 176726,
+    "avg_sales": 6239
+  },
+  {
+    "period": "2024-03",
+    "total_sales": 198539,
+    "avg_sales": 6414
+  },
+  {
+    "period": "2024-04",
+    "total_sales": 160430,
+    "avg_sales": 4515
+  },
+  {
+    "period": "2024-05",
+    "total_sales": 158141,
+    "avg_sales": 6384
+  },
+  {
+    "period": "2024-06",
+    "total_sales": 198276,
+    "avg_sales": 6884
+  },
+  {
+    "period": "2024-07",
+    "total_sales": 163522,
+    "avg_sales": 6369
+  },
+  {
+    "period": "2024-08",
+    "total_sales": 173691,
+    "avg_sales": 6008
+  },
+  {
+    "period": "2024-09",
+    "total_sales": 147643,
+    "avg_sales": 5049
+  },
+  {
+    "period": "2024-10",
+    "total_sales": 164867,
+    "avg_sales": 4573
+  },
+  {
+    "period": "2024-11",
+    "total_sales": 156890,
+    "avg_sales": 6198
+  },
+  {
+    "period": "2024-12",
+    "total_sales": 162345,
+    "avg_sales": 4913
+  }
+]

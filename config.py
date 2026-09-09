@@ -24,7 +24,7 @@ MOCK_FORECAST      = MOCKS_DIR / "mock_forecast.json"
 MOCK_SHAP          = MOCKS_DIR / "mock_shap.json"
 
 # ── Dev flags ─────────────────────────────────────────────────────────────────
-USE_MOCKS = False          # Flip to True on Day 1 before real data is ready
+USE_MOCKS = True          # Flip to True on Day 1 before real data is ready
 
 # ── LLM Settings ──────────────────────────────────────────────────────────────
 LLM_PROVIDER   = "openrouter"                          # "openrouter" | "ollama"
