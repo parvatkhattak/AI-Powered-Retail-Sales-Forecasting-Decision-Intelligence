@@ -458,3 +458,139 @@ def plot_anomaly_timeline(
         yaxis_title="Sales (€)",
     )
     return _apply_base(fig)
+
+
+# ── 9. Model Metrics Comparison ───────────────────────────────────────────────
+
+def plot_model_metrics_comparison(metrics: dict) -> go.Figure:
+    """
+    Grouped bar chart comparing RMSPE, MAE, and R² across LightGBM, XGBoost, Baseline.
+
+    Args:
+        metrics: dict from get_model_metrics() with keys lightgbm, xgboost, baseline.
+                 Each maps to {rmspe, mae, r2}.
+
+    Returns:
+        plotly Figure.
+    """
+    model_names = []
+    rmspe_vals = []
+    mae_vals   = []
+    r2_vals    = []
+
+    label_map  = {"lightgbm": "LightGBM", "xgboost": "XGBoost", "baseline": "Baseline (Moving Avg)"}
+    color_map  = {"lightgbm": PALETTE_PRIMARY, "xgboost": PALETTE_GREEN, "baseline": PALETTE_MUTED}
+
+    for key in ["lightgbm", "xgboost", "baseline"]:
+        if key in metrics:
+            m = metrics[key]
+            model_names.append(label_map.get(key, key))
+            rmspe_vals.append(round(m.get("rmspe", 0), 4))
+            mae_vals.append(round(m.get("mae", 0), 1))
+            r2_vals.append(round(m.get("r2", 0), 4))
+
+    colors = [color_map.get(k, PALETTE_MUTED) for k in ["lightgbm", "xgboost", "baseline"] if k in metrics]
+
+    # Two sub-plots: RMSPE (lower is better) and R² (higher is better)
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["RMSPE (lower = better)", "R² Score (higher = better)"],
+    )
+    fig.add_trace(
+        go.Bar(
+            x=model_names, y=rmspe_vals, name="RMSPE",
+            marker_color=colors,
+            text=[f"{v:.4f}" for v in rmspe_vals],
+            textposition="outside",
+            hovertemplate="%{x}<br>RMSPE: %{y:.4f}<extra></extra>",
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=model_names, y=r2_vals, name="R²",
+            marker_color=colors,
+            text=[f"{v:.4f}" for v in r2_vals],
+            textposition="outside",
+            hovertemplate="%{x}<br>R²: %{y:.4f}<extra></extra>",
+        ),
+        row=1, col=2,
+    )
+    fig.update_layout(
+        title=dict(text="Model Performance Comparison", font=dict(size=16, color=PALETTE_TEXT)),
+        showlegend=False,
+        **{k: v for k, v in _BASE_LAYOUT.items() if k != "colorway"},
+    )
+    fig.update_xaxes(tickfont=dict(color=PALETTE_MUTED))
+    fig.update_yaxes(gridcolor=PALETTE_BORDER, zeroline=False, tickfont=dict(color=PALETTE_MUTED))
+    return fig
+
+
+# ── 10. Promo Activity Timeline ───────────────────────────────────────────────
+
+def plot_promo_timeline(df: pd.DataFrame, store_id: int) -> go.Figure:
+    """
+    Line chart of daily sales with promo-day regions shaded in orange.
+
+    Args:
+        df:       DataFrame with columns [date, sales, promo] for a single store.
+        store_id: Store label for the chart title.
+
+    Returns:
+        plotly Figure.
+    """
+    date_col  = "date"  if "date"  in df.columns else df.columns[0]
+    sales_col = "sales" if "sales" in df.columns else df.columns[1]
+    promo_col = "promo" if "promo" in df.columns else None
+
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    fig = go.Figure()
+
+    # Main sales line
+    fig.add_trace(
+        go.Scatter(
+            x=df[date_col], y=df[sales_col],
+            mode="lines",
+            name="Daily Sales",
+            line=dict(color=PALETTE_PRIMARY, width=2),
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Sales: €%{y:,.0f}<extra></extra>",
+        )
+    )
+
+    # Shade promo blocks with semi-transparent rectangles
+    if promo_col and promo_col in df.columns:
+        promo_days = df[df[promo_col] == 1][date_col].tolist()
+        if promo_days:
+            # Group consecutive promo days into start/end ranges for shading
+            promo_dates = sorted(pd.to_datetime(promo_days))
+            blocks = []
+            start = promo_dates[0]
+            prev  = promo_dates[0]
+            for d in promo_dates[1:]:
+                if (d - prev).days > 1:
+                    blocks.append((start, prev))
+                    start = d
+                prev = d
+            blocks.append((start, prev))
+
+            for (bstart, bend) in blocks:
+                fig.add_vrect(
+                    x0=bstart, x1=bend,
+                    fillcolor=PALETTE_ORANGE,
+                    opacity=0.12,
+                    line_width=0,
+                    annotation_text="Promo" if len(blocks) == 1 else "",
+                    annotation_position="top left",
+                )
+
+    fig.update_layout(
+        title=dict(
+            text=f"Store {store_id} — Promo Activity Timeline",
+            font=dict(size=16, color=PALETTE_TEXT),
+        ),
+        xaxis_title="Date",
+        yaxis_title="Sales (€)",
+    )
+    return _apply_base(fig)
