@@ -1,8 +1,1052 @@
 [
-  {"store_id": 100, "date": "2025-09-01", "sales": 6500, "customers": 580, "promo": 1},
-  {"store_id": 100, "date": "2025-09-02", "sales": 6200, "customers": 550, "promo": 1},
-  {"store_id": 100, "date": "2025-09-03", "sales": 4100, "customers": 420, "promo": 0},
-  {"store_id": 200, "date": "2025-09-01", "sales": 3200, "customers": 310, "promo": 1},
-  {"store_id": 200, "date": "2025-09-02", "sales": 2900, "customers": 290, "promo": 0},
-  {"store_id": 300, "date": "2025-09-01", "sales": 8900, "customers": 810, "promo": 1}
+  {
+    "store_id": 100,
+    "date": "2025-08-10",
+    "sales": 5957,
+    "customers": 636,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-10",
+    "sales": 4198,
+    "customers": 368,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-10",
+    "sales": 9285,
+    "customers": 833,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-10",
+    "sales": 5340,
+    "customers": 476,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-10",
+    "sales": 4217,
+    "customers": 339,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-11",
+    "sales": 6504,
+    "customers": 708,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-11",
+    "sales": 3679,
+    "customers": 395,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-11",
+    "sales": 9947,
+    "customers": 984,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-11",
+    "sales": 5322,
+    "customers": 508,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-11",
+    "sales": 4838,
+    "customers": 380,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-12",
+    "sales": 6362,
+    "customers": 657,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-12",
+    "sales": 2850,
+    "customers": 271,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-12",
+    "sales": 9096,
+    "customers": 810,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-12",
+    "sales": 5953,
+    "customers": 492,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-12",
+    "sales": 4549,
+    "customers": 443,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-13",
+    "sales": 7212,
+    "customers": 565,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-13",
+    "sales": 2962,
+    "customers": 255,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-13",
+    "sales": 9676,
+    "customers": 893,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-13",
+    "sales": 6457,
+    "customers": 574,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-13",
+    "sales": 5229,
+    "customers": 415,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-14",
+    "sales": 5782,
+    "customers": 445,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-14",
+    "sales": 2796,
+    "customers": 304,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-14",
+    "sales": 11336,
+    "customers": 932,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-14",
+    "sales": 4924,
+    "customers": 468,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-14",
+    "sales": 4129,
+    "customers": 320,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-15",
+    "sales": 5473,
+    "customers": 461,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-15",
+    "sales": 3128,
+    "customers": 311,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-15",
+    "sales": 7980,
+    "customers": 743,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-15",
+    "sales": 6099,
+    "customers": 488,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-15",
+    "sales": 5126,
+    "customers": 528,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-16",
+    "sales": 6751,
+    "customers": 662,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-16",
+    "sales": 3181,
+    "customers": 331,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-16",
+    "sales": 8883,
+    "customers": 733,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-16",
+    "sales": 4841,
+    "customers": 470,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-16",
+    "sales": 5653,
+    "customers": 452,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-17",
+    "sales": 5914,
+    "customers": 641,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-17",
+    "sales": 3433,
+    "customers": 367,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-17",
+    "sales": 7890,
+    "customers": 655,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-17",
+    "sales": 5009,
+    "customers": 459,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-17",
+    "sales": 3869,
+    "customers": 310,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-18",
+    "sales": 5771,
+    "customers": 517,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-18",
+    "sales": 2878,
+    "customers": 281,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-18",
+    "sales": 9117,
+    "customers": 848,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-18",
+    "sales": 5000,
+    "customers": 505,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-18",
+    "sales": 5234,
+    "customers": 528,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-19",
+    "sales": 6952,
+    "customers": 603,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-19",
+    "sales": 4252,
+    "customers": 342,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-19",
+    "sales": 10308,
+    "customers": 883,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-19",
+    "sales": 6268,
+    "customers": 492,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-19",
+    "sales": 4073,
+    "customers": 336,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-20",
+    "sales": 5739,
+    "customers": 611,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-20",
+    "sales": 3043,
+    "customers": 280,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-20",
+    "sales": 9166,
+    "customers": 709,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-20",
+    "sales": 6714,
+    "customers": 648,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-20",
+    "sales": 3853,
+    "customers": 395,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-21",
+    "sales": 6084,
+    "customers": 602,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-21",
+    "sales": 4269,
+    "customers": 396,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-21",
+    "sales": 8906,
+    "customers": 968,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-21",
+    "sales": 5944,
+    "customers": 462,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-21",
+    "sales": 4443,
+    "customers": 460,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-22",
+    "sales": 5774,
+    "customers": 545,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-22",
+    "sales": 3762,
+    "customers": 291,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-22",
+    "sales": 11750,
+    "customers": 1086,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-22",
+    "sales": 6104,
+    "customers": 470,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-22",
+    "sales": 4315,
+    "customers": 449,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-23",
+    "sales": 8622,
+    "customers": 762,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-23",
+    "sales": 3284,
+    "customers": 356,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-23",
+    "sales": 8806,
+    "customers": 710,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-23",
+    "sales": 7635,
+    "customers": 819,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-23",
+    "sales": 5242,
+    "customers": 448,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-24",
+    "sales": 7043,
+    "customers": 561,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-24",
+    "sales": 3963,
+    "customers": 345,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-24",
+    "sales": 8977,
+    "customers": 809,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-24",
+    "sales": 5110,
+    "customers": 431,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-24",
+    "sales": 4997,
+    "customers": 428,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-25",
+    "sales": 7408,
+    "customers": 617,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-25",
+    "sales": 3836,
+    "customers": 295,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-25",
+    "sales": 7899,
+    "customers": 802,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-25",
+    "sales": 7590,
+    "customers": 606,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-25",
+    "sales": 3972,
+    "customers": 412,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-26",
+    "sales": 6503,
+    "customers": 568,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-26",
+    "sales": 3215,
+    "customers": 356,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-26",
+    "sales": 8376,
+    "customers": 719,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-26",
+    "sales": 5017,
+    "customers": 530,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-26",
+    "sales": 5190,
+    "customers": 514,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-27",
+    "sales": 6524,
+    "customers": 665,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-27",
+    "sales": 2924,
+    "customers": 267,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-27",
+    "sales": 9531,
+    "customers": 1017,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-27",
+    "sales": 5205,
+    "customers": 577,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-27",
+    "sales": 4235,
+    "customers": 421,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-28",
+    "sales": 6277,
+    "customers": 586,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-28",
+    "sales": 3480,
+    "customers": 278,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-28",
+    "sales": 8896,
+    "customers": 721,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-28",
+    "sales": 5035,
+    "customers": 529,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-28",
+    "sales": 5616,
+    "customers": 461,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-29",
+    "sales": 6794,
+    "customers": 690,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-29",
+    "sales": 3506,
+    "customers": 289,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-29",
+    "sales": 8602,
+    "customers": 749,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-29",
+    "sales": 7584,
+    "customers": 609,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-29",
+    "sales": 4406,
+    "customers": 352,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-30",
+    "sales": 8190,
+    "customers": 793,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-30",
+    "sales": 3325,
+    "customers": 267,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-30",
+    "sales": 8307,
+    "customers": 684,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-30",
+    "sales": 7489,
+    "customers": 602,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-30",
+    "sales": 5514,
+    "customers": 509,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-08-31",
+    "sales": 8299,
+    "customers": 837,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-08-31",
+    "sales": 3590,
+    "customers": 348,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-08-31",
+    "sales": 9786,
+    "customers": 967,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-08-31",
+    "sales": 5368,
+    "customers": 415,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-08-31",
+    "sales": 4532,
+    "customers": 479,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-01",
+    "sales": 5722,
+    "customers": 445,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-01",
+    "sales": 3511,
+    "customers": 327,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-01",
+    "sales": 8406,
+    "customers": 736,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-01",
+    "sales": 5348,
+    "customers": 473,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-01",
+    "sales": 5382,
+    "customers": 598,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-02",
+    "sales": 6257,
+    "customers": 527,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-02",
+    "sales": 3227,
+    "customers": 309,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-02",
+    "sales": 11434,
+    "customers": 1108,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-02",
+    "sales": 7449,
+    "customers": 627,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-02",
+    "sales": 4890,
+    "customers": 460,
+    "promo": 1
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-03",
+    "sales": 5896,
+    "customers": 620,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-03",
+    "sales": 3428,
+    "customers": 293,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-03",
+    "sales": 9044,
+    "customers": 886,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-03",
+    "sales": 4841,
+    "customers": 477,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-03",
+    "sales": 4179,
+    "customers": 360,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-04",
+    "sales": 6114,
+    "customers": 620,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-04",
+    "sales": 3398,
+    "customers": 279,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-04",
+    "sales": 9904,
+    "customers": 895,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-04",
+    "sales": 5282,
+    "customers": 430,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-04",
+    "sales": 4270,
+    "customers": 431,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-05",
+    "sales": 6865,
+    "customers": 688,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-05",
+    "sales": 3360,
+    "customers": 362,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-05",
+    "sales": 9074,
+    "customers": 928,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-05",
+    "sales": 5493,
+    "customers": 551,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-05",
+    "sales": 3613,
+    "customers": 301,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-06",
+    "sales": 5615,
+    "customers": 525,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-06",
+    "sales": 4301,
+    "customers": 388,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-06",
+    "sales": 10338,
+    "customers": 834,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-06",
+    "sales": 5898,
+    "customers": 505,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-06",
+    "sales": 4194,
+    "customers": 328,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-07",
+    "sales": 6368,
+    "customers": 536,
+    "promo": 0
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-07",
+    "sales": 3346,
+    "customers": 299,
+    "promo": 0
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-07",
+    "sales": 9315,
+    "customers": 855,
+    "promo": 0
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-07",
+    "sales": 6458,
+    "customers": 559,
+    "promo": 1
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-07",
+    "sales": 4121,
+    "customers": 358,
+    "promo": 0
+  },
+  {
+    "store_id": 100,
+    "date": "2025-09-08",
+    "sales": 6964,
+    "customers": 687,
+    "promo": 1
+  },
+  {
+    "store_id": 200,
+    "date": "2025-09-08",
+    "sales": 3707,
+    "customers": 332,
+    "promo": 1
+  },
+  {
+    "store_id": 300,
+    "date": "2025-09-08",
+    "sales": 10291,
+    "customers": 874,
+    "promo": 1
+  },
+  {
+    "store_id": 400,
+    "date": "2025-09-08",
+    "sales": 4925,
+    "customers": 463,
+    "promo": 0
+  },
+  {
+    "store_id": 500,
+    "date": "2025-09-08",
+    "sales": 4017,
+    "customers": 409,
+    "promo": 0
+  }
 ]
