@@ -11,11 +11,8 @@ dist/
 build/
 .eggs/
 
-# ── Data & Models (too large for git) ────────────────
+# ── Data & Models ────────────────
 data/retail.db
-data/train.csv
-models/*.pkl
-models/*.joblib
 
 # ── Jupyter ───────────────────────────────────────────
 .ipynb_checkpoints/

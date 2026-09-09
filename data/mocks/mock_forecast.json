@@ -1,0 +1,9 @@
+[
+  {"date": "2015-08-01", "predicted_sales": 6500, "lower": 5735, "upper": 7265},
+  {"date": "2015-08-02", "predicted_sales": 6200, "lower": 5472, "upper": 6928},
+  {"date": "2015-08-03", "predicted_sales": 7100, "lower": 6267, "upper": 7933},
+  {"date": "2015-08-04", "predicted_sales": 6800, "lower": 6002, "upper": 7598},
+  {"date": "2015-08-05", "predicted_sales": 6600, "lower": 5826, "upper": 7374},
+  {"date": "2015-08-06", "predicted_sales": 6900, "lower": 6090, "upper": 7710},
+  {"date": "2015-08-07", "predicted_sales": 7400, "lower": 6532, "upper": 8268}
+]
