@@ -1,5 +1,6 @@
 import streamlit as st
 from config import APP_TITLE, APP_ICON, APP_LAYOUT
+from src.ui_theme import apply_theme
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -7,6 +8,7 @@ st.set_page_config(
     layout=APP_LAYOUT,
     initial_sidebar_state="expanded",
 )
+apply_theme()
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:

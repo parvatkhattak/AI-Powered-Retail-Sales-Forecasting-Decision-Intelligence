@@ -11,11 +11,14 @@ dist/
 build/
 .eggs/
 
-# ── Data & Models (too large for git) ────────────────
+# ── Data (too large for git) ──────────────────────────
 data/retail.db
 data/train.csv
-models/*.pkl
-models/*.joblib
+data/raw/
+data/processed/
+
+# Trained models ARE tracked — small enough (~9MB total) and the app needs
+# them to run without every clone having to retrain from scratch.
 
 # ── Jupyter ───────────────────────────────────────────
 .ipynb_checkpoints/

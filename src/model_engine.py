@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DB_PATH, MODEL_PATH, LGBM_PATH, STORE_CSV, FORECAST_DAYS, LAG_DAYS, ROLLING_WINDOWS, USE_MOCKS, MOCK_FORECAST, MOCK_SHAP
+from config import DB_PATH, MODEL_PATH, LGBM_PATH, STORE_CSV, FORECAST_DAYS, LAG_DAYS, ROLLING_WINDOWS, USE_MOCKS, MOCK_FORECAST, MOCK_SHAP, WALKFORWARD_FOLDS
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -71,71 +71,108 @@ def _load_and_prepare() -> pd.DataFrame:
 
 
 def train_model() -> None:
-    """Trains the forecasting models and saves artifacts to models/."""
+    """Trains the forecasting models and saves artifacts to models/.
+
+    Validates with walk-forward cross-validation: WALKFORWARD_FOLDS
+    non-overlapping FORECAST_DAYS-length folds, each with an expanding
+    training window that only ever sees data strictly before its own fold —
+    never a single lucky/unlucky holdout block, and never shuffled (this is
+    a time series). Final production models are then retrained on the full
+    cleaned history so the deployed forecaster uses every real data point."""
     print("\n🚀 Training forecasting models...\n")
     df = _load_and_prepare()
     feature_cols = [c for c in df.columns if c not in DROP_COLS + ["SalesLog"]]
 
-    # Time-based split for honest evaluation — never shuffle a time series.
-    cutoff = df["Date"].max() - pd.Timedelta(days=42)
-    train_df = df[df["Date"] <= cutoff].copy()
-    valid_df = df[df["Date"] > cutoff].copy()
-
-    # NaN in lag/rolling = not enough history yet -> drop those rows.
+    # NaN in lag/rolling = not enough history yet -> drop those rows. Safe to
+    # do globally before splitting: a row's own history is fixed regardless
+    # of which fold it lands in, so this can't leak information across folds.
     lag_roll_cols = [c for c in feature_cols if c.startswith("Sales_lag_") or c.startswith("Sales_roll_")]
-    train_df = train_df.dropna(subset=lag_roll_cols)
-    valid_df = valid_df.dropna(subset=lag_roll_cols)
+    df = df.dropna(subset=lag_roll_cols).reset_index(drop=True)
+
+    holdout_days = WALKFORWARD_FOLDS * FORECAST_DAYS
+    cutoff = df["Date"].max() - pd.Timedelta(days=holdout_days)
 
     # NaN elsewhere (competition/promo timing gaps) = permanently unknown for
     # some stores, not "wait for more data" -> median-fill instead of dropping.
+    # Medians come from ONLY the pre-cutoff data, so no fold — including the
+    # earliest — ever gets filled from information a real forecast wouldn't
+    # have had yet.
     remaining_na_cols = ["CompetitionDistance", "CompetitionOpenMonths", "DaysSinceLastPromo", "DaysUntilNextPromo"]
-    medians = train_df[remaining_na_cols].median()
-    train_df[remaining_na_cols] = train_df[remaining_na_cols].fillna(medians)
-    valid_df[remaining_na_cols] = valid_df[remaining_na_cols].fillna(medians)
+    medians = df.loc[df["Date"] <= cutoff, remaining_na_cols].median()
+    df[remaining_na_cols] = df[remaining_na_cols].fillna(medians)
 
-    X_train, y_train = train_df[feature_cols], train_df["SalesLog"]
-    X_valid = valid_df[feature_cols]
-    y_valid_actual = valid_df["Sales"].values
+    print(f"   Walk-forward CV: {WALKFORWARD_FOLDS} folds x {FORECAST_DAYS} days, "
+          f"expanding training window, holdout starts {cutoff.date()}...")
 
-    print("   Evaluating on held-out last 6 weeks...")
-    lgbm_eval = lgb.LGBMRegressor(**LGBM_PARAMS)
-    lgbm_eval.fit(X_train, y_train)
-    lgbm_pred = np.expm1(lgbm_eval.predict(X_valid))
+    fold_metrics = {"lightgbm": [], "xgboost": [], "baseline": []}
+    for k in range(1, WALKFORWARD_FOLDS + 1):
+        valid_start = cutoff + pd.Timedelta(days=(k - 1) * FORECAST_DAYS + 1)
+        valid_end = cutoff + pd.Timedelta(days=k * FORECAST_DAYS)
+        fold_train = df[df["Date"] < valid_start]
+        fold_valid = df[(df["Date"] >= valid_start) & (df["Date"] <= valid_end)]
+        if fold_train.empty or fold_valid.empty:
+            continue
 
-    xgb_eval = xgb.XGBRegressor(**XGB_PARAMS)
-    xgb_eval.fit(X_train, y_train)
-    xgb_pred = np.expm1(xgb_eval.predict(X_valid))
+        X_train, y_train = fold_train[feature_cols], fold_train["SalesLog"]
+        X_valid = fold_valid[feature_cols]
+        y_valid_actual = fold_valid["Sales"].values
 
-    baseline_pred = valid_df["Sales_roll_mean_7"].fillna(train_df["Sales"].mean()).values
+        lgbm_fold = lgb.LGBMRegressor(**LGBM_PARAMS)
+        lgbm_fold.fit(X_train, y_train)
+        lgbm_pred = np.expm1(lgbm_fold.predict(X_valid))
 
-    metrics = {
-        "lightgbm": {
+        xgb_fold = xgb.XGBRegressor(**XGB_PARAMS)
+        xgb_fold.fit(X_train, y_train)
+        xgb_pred = np.expm1(xgb_fold.predict(X_valid))
+
+        baseline_pred = fold_valid["Sales_roll_mean_7"].fillna(fold_train["Sales"].mean()).values
+
+        fold_info = {"fold": k, "valid_start": str(valid_start.date()), "valid_end": str(valid_end.date())}
+        fold_metrics["lightgbm"].append({**fold_info,
             "rmspe": rmspe(y_valid_actual, lgbm_pred),
             "mae": mean_absolute_error(y_valid_actual, lgbm_pred),
-            "r2": r2_score(y_valid_actual, lgbm_pred),
-        },
-        "xgboost": {
+            "r2": r2_score(y_valid_actual, lgbm_pred)})
+        fold_metrics["xgboost"].append({**fold_info,
             "rmspe": rmspe(y_valid_actual, xgb_pred),
             "mae": mean_absolute_error(y_valid_actual, xgb_pred),
-            "r2": r2_score(y_valid_actual, xgb_pred),
-        },
-        "baseline": {
+            "r2": r2_score(y_valid_actual, xgb_pred)})
+        fold_metrics["baseline"].append({**fold_info,
             "rmspe": rmspe(y_valid_actual, baseline_pred),
             "mae": mean_absolute_error(y_valid_actual, baseline_pred),
-            "r2": r2_score(y_valid_actual, baseline_pred),
-        },
+            "r2": r2_score(y_valid_actual, baseline_pred)})
+        print(f"   Fold {k} ({valid_start.date()} → {valid_end.date()}): "
+              f"LightGBM RMSPE={fold_metrics['lightgbm'][-1]['rmspe']:.4f} | "
+              f"XGBoost RMSPE={fold_metrics['xgboost'][-1]['rmspe']:.4f} | "
+              f"Baseline RMSPE={fold_metrics['baseline'][-1]['rmspe']:.4f}")
+
+    def _aggregate(name):
+        vals = fold_metrics[name]
+        return {
+            "rmspe": float(np.mean([f["rmspe"] for f in vals])),
+            "rmspe_std": float(np.std([f["rmspe"] for f in vals])),
+            "mae": float(np.mean([f["mae"] for f in vals])),
+            "r2": float(np.mean([f["r2"] for f in vals])),
+            "folds": vals,
+        }
+
+    metrics = {
+        "lightgbm": _aggregate("lightgbm"),
+        "xgboost": _aggregate("xgboost"),
+        "baseline": _aggregate("baseline"),
         "primary_model": "lightgbm",
+        "validation": f"{WALKFORWARD_FOLDS}-fold walk-forward CV, {FORECAST_DAYS}-day folds, expanding training window",
     }
     for name in ["lightgbm", "xgboost", "baseline"]:
         m = metrics[name]
-        print(f"   {name:9s} RMSPE={m['rmspe']:.4f} | MAE={m['mae']:.0f} | R2={m['r2']:.4f}")
+        print(f"   {name:9s} mean RMSPE={m['rmspe']:.4f} (±{m['rmspe_std']:.4f}) | "
+              f"mean MAE={m['mae']:.0f} | mean R2={m['r2']:.4f}")
 
-    # Final production fit: retrain on ALL cleaned data (train + valid combined) —
-    # hyperparameters are already chosen, so no reason to hold back real data
-    # from the model that will actually make forecasts.
+    # Final production fit: retrain on the FULL cleaned history (every fold's
+    # train + validation rows combined) — hyperparameters are already chosen
+    # via CV, so no reason to hold back real data from the model that will
+    # actually make forecasts.
     print("\n   Retraining final models on full dataset...")
-    full_df = pd.concat([train_df, valid_df], ignore_index=True)
-    X_full, y_full = full_df[feature_cols], full_df["SalesLog"]
+    X_full, y_full = df[feature_cols], df["SalesLog"]
 
     lgbm_final = lgb.LGBMRegressor(**LGBM_PARAMS)
     lgbm_final.fit(X_full, y_full)
@@ -276,7 +313,11 @@ def _build_feature_row(ctx, day, feature_cols, medians):
 
     X = pd.DataFrame([feat])[feature_cols]
     remaining_na_cols = ["CompetitionDistance", "CompetitionOpenMonths", "DaysSinceLastPromo", "DaysUntilNextPromo"]
-    X[remaining_na_cols] = X[remaining_na_cols].fillna(medians)
+    # A single-row frame with a NULL value reads that column in as dtype
+    # object (pandas has nothing else in the column to infer float64 from),
+    # and fillna() alone doesn't fix the dtype — LightGBM then rejects it.
+    # Force numeric after filling so this can't silently break a forecast.
+    X[remaining_na_cols] = X[remaining_na_cols].fillna(medians).astype(float)
     return X
 
 
@@ -310,6 +351,32 @@ def _recursive_forecast(ctx, model, feature_cols, medians, val_rmspe=None):
     return rows
 
 
+def get_missing_store_info(store_id: int) -> dict | None:
+    """For the 259 stores that exist in the DB but aren't covered by the
+    original test.csv forecast calendar (so _forecast_context() returns None):
+    returns what we DO know — this store's own recent trading average — plus
+    the shared 7-day window dates every other store's forecast uses, so the
+    UI can show an honest 'no forecast, here's why' timeline instead of
+    silently implying its sales are actually expected to be zero.
+    Returns None only if the store_id itself has no history at all."""
+    conn = sqlite3.connect(DB_PATH)
+    hist = pd.read_sql(
+        "SELECT Date, Sales, Open FROM sales WHERE Store = ? ORDER BY Date DESC LIMIT 90",
+        conn, params=(store_id,), parse_dates=["Date"]
+    )
+    conn.close()
+    if hist.empty:
+        return None
+
+    open_hist = hist[hist["Open"] == 1]
+    recent_avg = float(open_hist["Sales"].mean()) if not open_hist.empty else 0.0
+
+    test_df = pd.read_csv(Path(DB_PATH).parent / "test.csv", parse_dates=["Date"])
+    window_dates = sorted(test_df["Date"].unique())[:FORECAST_DAYS]
+
+    return {"recent_avg": recent_avg, "dates": pd.to_datetime(window_dates)}
+
+
 def get_7day_forecast(store_id: int) -> pd.DataFrame:
     """Returns a 7-row DataFrame: Date, PredictedSales, LowerBound, UpperBound."""
     if USE_MOCKS:
@@ -321,6 +388,19 @@ def get_7day_forecast(store_id: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     return pd.DataFrame(_recursive_forecast(ctx, model, feature_cols, medians, val_rmspe))
+
+def get_forecast_calendar(store_id: int) -> pd.DataFrame:
+    """Returns the store's forecast-window calendar — Date, Open, Promo,
+    StateHoliday, SchoolHoliday — as known in advance from test.csv. Lets the
+    UI show *why* a day looks the way it does (promo running, holiday, closed)
+    without re-deriving model internals or re-reading test.csv itself."""
+    if USE_MOCKS:
+        return pd.DataFrame()
+    ctx = _forecast_context(store_id)
+    if ctx is None:
+        return pd.DataFrame()
+    return ctx["future"][["Date", "Open", "Promo", "StateHoliday", "SchoolHoliday"]].reset_index(drop=True)
+
 
 def get_shap_explanations(store_id: int) -> dict:
     """Returns top 5 SHAP drivers: {feature_name: {shap_value, direction}} for
