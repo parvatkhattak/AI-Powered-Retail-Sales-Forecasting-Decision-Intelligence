@@ -1,0 +1,72 @@
+[
+  {
+    "Store": 200,
+    "promo_avg_sales": 7068.2,
+    "non_promo_avg_sales": 3783.69,
+    "uplift_pct": 86.81,
+    "store_type": "b"
+  },
+  {
+    "Store": 301,
+    "promo_avg_sales": 11703.48,
+    "non_promo_avg_sales": 6527.71,
+    "uplift_pct": 79.29,
+    "store_type": "d"
+  },
+  {
+    "Store": 100,
+    "promo_avg_sales": 4301.3,
+    "non_promo_avg_sales": 2501.15,
+    "uplift_pct": 71.97,
+    "store_type": "a"
+  },
+  {
+    "Store": 401,
+    "promo_avg_sales": 12255.84,
+    "non_promo_avg_sales": 7609.1,
+    "uplift_pct": 61.07,
+    "store_type": "a"
+  },
+  {
+    "Store": 501,
+    "promo_avg_sales": 3750.12,
+    "non_promo_avg_sales": 2343.97,
+    "uplift_pct": 59.99,
+    "store_type": "b"
+  },
+  {
+    "Store": 300,
+    "promo_avg_sales": 11790.21,
+    "non_promo_avg_sales": 7843.82,
+    "uplift_pct": 50.31,
+    "store_type": "c"
+  },
+  {
+    "Store": 201,
+    "promo_avg_sales": 5775.37,
+    "non_promo_avg_sales": 3905.24,
+    "uplift_pct": 47.89,
+    "store_type": "c"
+  },
+  {
+    "Store": 500,
+    "promo_avg_sales": 3816.73,
+    "non_promo_avg_sales": 2752.91,
+    "uplift_pct": 38.64,
+    "store_type": "a"
+  },
+  {
+    "Store": 101,
+    "promo_avg_sales": 8492.8,
+    "non_promo_avg_sales": 6233.46,
+    "uplift_pct": 36.25,
+    "store_type": "b"
+  },
+  {
+    "Store": 400,
+    "promo_avg_sales": 4211.95,
+    "non_promo_avg_sales": 3323.07,
+    "uplift_pct": 26.75,
+    "store_type": "d"
+  }
+]

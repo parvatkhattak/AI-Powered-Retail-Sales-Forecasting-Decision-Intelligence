@@ -30,7 +30,10 @@ def get_store_metrics(store_ids: list[int], days: int = 30) -> pd.DataFrame:
     """Returns daily sales, customers, promo flag for given stores over last N days."""
     if USE_MOCKS:
         print("MOCK: Returning mock store metrics")
-        mock_df = pd.DataFrame(MOCK_STORE_METRICS)
+        with open(MOCK_STORE_METRICS) as f:
+            mock_df = pd.DataFrame(json.load(f))
+        if "date" in mock_df.columns:
+            mock_df["date"] = pd.to_datetime(mock_df["date"])
         if "store_id" in mock_df.columns:
             mock_df = mock_df[mock_df["store_id"].isin(store_ids)] if store_ids else mock_df
         return mock_df.reset_index(drop=True)
