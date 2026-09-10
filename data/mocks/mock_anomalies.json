@@ -1,0 +1,17 @@
+[
+  {
+    "date": "2025-08-14",
+    "sales": 14500,
+    "sales_zscore": 3.1
+  },
+  {
+    "date": "2025-08-21",
+    "sales": 1800,
+    "sales_zscore": -2.7
+  },
+  {
+    "date": "2025-08-28",
+    "sales": 15200,
+    "sales_zscore": 3.4
+  }
+]
