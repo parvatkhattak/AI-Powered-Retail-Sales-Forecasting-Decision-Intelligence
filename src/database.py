@@ -268,6 +268,152 @@ def get_store_cluster(store_id: int) -> dict:
  
     return {"cluster_id": cluster_id, "cluster_label": label}
 
+
+def get_competition_impact_analysis() -> pd.DataFrame:
+    """Buckets stores by CompetitionDistance and compares avg sales/customers."""
+    if USE_MOCKS:
+        return pd.DataFrame([
+            {"distance_bucket": "0-500m", "avg_sales": 4500.0, "avg_customers": 500.0, "store_count": 12},
+            {"distance_bucket": "500-1000m", "avg_sales": 5200.0, "avg_customers": 550.0, "store_count": 18},
+        ])
+
+    engine = _get_engine()
+    query = text("""
+        SELECT Store, CompetitionDistance AS competition_distance,
+               AVG(Sales) AS avg_sales, AVG(Customers) AS avg_customers
+        FROM sales
+        GROUP BY Store
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+
+    bins = [0, 500, 1000, 2500, 5000, 10000, float("inf")]
+    labels = ["0-500m", "500-1000m", "1000-2500m", "2500-5000m", "5000-10000m", "10000m+"]
+    df["distance_bucket"] = pd.cut(df["competition_distance"], bins=bins, labels=labels, right=False)
+
+    summary = (
+        df.groupby("distance_bucket", observed=True)
+        .agg(avg_sales=("avg_sales", "mean"),
+             avg_customers=("avg_customers", "mean"),
+             store_count=("Store", "nunique"))
+        .reset_index()
+    )
+    summary["avg_sales"] = summary["avg_sales"].round(2)
+    summary["avg_customers"] = summary["avg_customers"].round(2)
+    return summary
+
+
+def get_competition_open_impact(store_id: int, window_days: int = 90) -> dict:
+    """Avg sales before vs after a nearby competitor opened, for one store."""
+    if USE_MOCKS:
+        return {"competitor_open_date": "2023-06-01", "avg_sales_before": 5000.0,
+                "avg_sales_after": 4200.0, "pct_change": -16.0}
+
+    engine = _get_engine()
+    meta_query = text("""
+        SELECT DISTINCT CompetitionOpenSinceYear, CompetitionOpenSinceMonth
+        FROM sales WHERE Store = :store_id
+    """)
+    with engine.connect() as conn:
+        meta = pd.read_sql(meta_query, conn, params={"store_id": store_id})
+    if meta.empty:
+        return {}
+
+    year, month = meta["CompetitionOpenSinceYear"].iloc[0], meta["CompetitionOpenSinceMonth"].iloc[0]
+    if not year or not month:
+        return {}
+    open_date = f"{int(year)}-{int(month):02d}-01"
+
+    query = text("""
+        SELECT Date AS date, Sales AS sales
+        FROM sales
+        WHERE Store = :store_id
+          AND Date BETWEEN date(:open_date, '-' || :window || ' days')
+                        AND date(:open_date, '+' || :window || ' days')
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn,
+                          params={"store_id": store_id, "open_date": open_date, "window": window_days},
+                          parse_dates=["date"])
+    if df.empty:
+        return {}
+
+    open_dt = pd.Timestamp(open_date)
+    before, after = df[df["date"] < open_dt]["sales"], df[df["date"] >= open_dt]["sales"]
+    avg_before = float(before.mean()) if not before.empty else 0.0
+    avg_after = float(after.mean()) if not after.empty else 0.0
+    pct_change = ((avg_after - avg_before) / avg_before * 100.0) if avg_before > 0 else 0.0
+
+    return {
+        "competitor_open_date": open_date,
+        "avg_sales_before": round(avg_before, 2),
+        "avg_sales_after": round(avg_after, 2),
+        "pct_change": round(pct_change, 2),
+    }
+
+
+def get_promo2_effectiveness() -> pd.DataFrame:
+    """Compares avg sales for stores currently in an active Promo2 month vs not."""
+    if USE_MOCKS:
+        return pd.DataFrame([
+            {"has_promo2": 0, "avg_sales": 4800.0, "store_count": 20},
+            {"has_promo2": 1, "avg_sales": 5100.0, "store_count": 30},
+        ])
+
+    engine = _get_engine()
+    query = text("""
+        SELECT Store,
+               CASE WHEN Promo2 = 1 AND IsPromoMonth = 1 THEN 1 ELSE 0 END AS has_promo2,
+               AVG(Sales) AS avg_sales
+        FROM sales
+        GROUP BY Store, has_promo2
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+
+    summary = (
+        df.groupby("has_promo2")
+        .agg(avg_sales=("avg_sales", "mean"), store_count=("Store", "nunique"))
+        .reset_index()
+    )
+    summary["avg_sales"] = summary["avg_sales"].round(2)
+    return summary
+
+
+def get_promo_uplift_by_segment(segment_col: str = "StoreType") -> pd.DataFrame:
+    """Promo uplift % broken down by StoreType or Assortment."""
+    if segment_col not in ("StoreType", "Assortment"):
+        raise ValueError("segment_col must be 'StoreType' or 'Assortment'")
+
+    if USE_MOCKS:
+        return pd.DataFrame([
+            {segment_col: "a", "promo_avg_sales": 6000.0, "non_promo_avg_sales": 4500.0, "uplift_pct": 33.3},
+        ])
+
+    engine = _get_engine()
+    # segment_col is whitelisted above, so this f-string is safe from injection
+    query = text(f"""
+        SELECT {segment_col} AS segment,
+               AVG(CASE WHEN Promo = 1 THEN Sales END) AS promo_avg_sales,
+               AVG(CASE WHEN Promo = 0 THEN Sales END) AS non_promo_avg_sales
+        FROM sales
+        GROUP BY {segment_col}
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+
+    df["uplift_pct"] = ((df["promo_avg_sales"] - df["non_promo_avg_sales"])
+                         / df["non_promo_avg_sales"] * 100.0).round(2)
+    df["promo_avg_sales"] = df["promo_avg_sales"].round(2)
+    df["non_promo_avg_sales"] = df["non_promo_avg_sales"].round(2)
+    return df.rename(columns={"segment": segment_col})
+
 def get_anomaly_flags(store_id: int, lookback_days: int = 90) -> pd.DataFrame:
     """Returns dates flagged as anomalous sales."""
     if USE_MOCKS:
