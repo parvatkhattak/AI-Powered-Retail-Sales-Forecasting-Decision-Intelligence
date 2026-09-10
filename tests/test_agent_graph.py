@@ -83,6 +83,22 @@ def test_curveball_response_has_citations():
     assert "Sources" in response or "📚" in response
 
 
+def test_sources_are_one_per_line_for_the_ui_parser():
+    """pages/4_AI_Assistant.py (Dikshit) splits the text after "Sources:" on
+    newlines to build separate citation cards via citation_card(). A single
+    comma-joined line would collapse into one garbled citation instead of
+    clean, separate ones — this reproduces that exact parsing logic."""
+    response = agent_graph.run_agent("How is Store 100 performing?")
+    assert "Sources:" in response
+
+    marker = "[Sources]" if "[Sources]" in response else "Sources:"
+    raw_sources = response.split(marker)[-1].strip().split("\n")
+    parsed = [s.strip("- •*").strip() for s in raw_sources if s.strip()]
+
+    assert len(parsed) >= 2, f"expected multiple distinct sources, got {parsed}"
+    assert all("," not in s for s in parsed), f"a source string still contains a comma: {parsed}"
+
+
 def test_curveball_response_ranks_multiple_stores():
     response = agent_graph.run_agent(CURVEBALL_QUESTION)
     for store_id in ("100", "200", "300"):

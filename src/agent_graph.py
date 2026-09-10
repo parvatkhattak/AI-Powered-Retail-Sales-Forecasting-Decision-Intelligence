@@ -260,7 +260,13 @@ def respond_node(state: AgentState) -> dict:
 
     sources = state.get("data_sources", [])
     if sources and "sources" not in response.lower():
-        response += "\n\n📚 **Sources:** " + ", ".join(sources)
+        # One source per line, not comma-separated — pages/4_AI_Assistant.py
+        # (Dikshit) splits this block on newlines to build separate citation
+        # cards via components.ui_helpers.citation_card(); a single
+        # comma-joined line would render as one garbled citation instead of
+        # clean, separate ones.
+        sources_block = "\n".join(f"- {s}" for s in sources)
+        response += f"\n\n📚 Sources:\n{sources_block}"
 
     return {"response": response}
 

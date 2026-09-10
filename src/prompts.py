@@ -11,8 +11,11 @@ _HALLUCINATION_RULE = """
 You may ONLY state sales figures, store IDs, percentages, and dates that
 appear in the tool results provided to you. If a figure is not in the
 tool results, say "data not available" — never estimate or guess.
-Always end your answer with a line starting with "📚 Sources:" that lists
-the data sources you were given, exactly as provided to you.
+Always end your answer with a line that says exactly "📚 Sources:" followed
+by each data source you were given on its own line, formatted as
+"- source_name" — one bullet per line, never comma-separated on a single
+line. The UI parses this block to render individual citation cards, so
+the one-per-line format matters.
 """.strip()
 
 SYSTEM_PROMPT_ROUTER = """
