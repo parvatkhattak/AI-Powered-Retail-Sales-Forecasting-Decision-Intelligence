@@ -5,11 +5,15 @@ numpy>=1.26
 # Database
 sqlalchemy>=2.0
 
-# Machine Learning
-scikit-learn>=1.3
-xgboost>=2.0
-lightgbm>=4.0
-shap>=0.44
+# Machine Learning — pinned exactly: models/*.pkl were trained/saved with
+# these versions, and a mismatched xgboost/lightgbm/scikit-learn can fail
+# to unpickle them (or load silently wrong). Bump deliberately, then retrain
+# and recommit the .pkl files together with any version bump here.
+scikit-learn==1.9.0
+xgboost==3.4.1
+lightgbm==4.7.0
+shap==0.52.0
+joblib==1.5.3
 optuna>=3.0
 joblib>=1.3
 

@@ -43,6 +43,12 @@ ROLLING_WINDOWS = [7, 14, 28]
 N_CLUSTERS      = 4          # KMeans clusters for store grouping
 ANOMALY_ZSCORE  = 2.5        # Z-score threshold for anomaly flagging
 
+# Walk-forward CV: number of rolling FORECAST_DAYS-length validation folds,
+# each with an expanding training window (see train_model()). 6 folds x 7 days
+# = same 42-day holdout region the old single-split evaluation used, just
+# validated properly instead of as one block.
+WALKFORWARD_FOLDS = 6
+
 # ── App Settings ──────────────────────────────────────────────────────────────
 APP_TITLE       = "Retail AI — Decision Intelligence Platform"
 APP_ICON        = "🛒"
