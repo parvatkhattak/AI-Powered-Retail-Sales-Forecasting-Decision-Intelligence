@@ -5,28 +5,35 @@ Owner: Dikshit — UI Developer
 Streaming chat interface powered by src/agent_graph.py.
 
 Features:
-  1. Streaming chat using run_agent_stream() with real-time token display
+  1. Streaming chat with a live elapsed timer and the agent's current stage
   2. Session message history (persists across re-runs via st.session_state)
   3. Clickable example question chips
   4. Citation cards showing which data sources backed each response
   5. Graceful error handling — agent failures show friendly message
 
 Architecture constraints:
-  - Calls ONLY run_agent_stream() and run_agent() from src/agent_graph.py
+  - Calls ONLY run_agent() from src/agent_graph.py
   - Never imports from database.py or model_engine.py directly
   - All errors wrapped in try/except — never crashes Streamlit
 """
 
+import logging
 import sys
+import threading
+import time
 from pathlib import Path
+from queue import Empty, Queue
+from uuid import uuid4
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config import USE_MOCKS
-from src.agent_graph import run_agent_stream
+from src.agent_graph import progress_reporting, reset_session, run_agent
 from components.ui_helpers import citation_card
 
 # ── Page Config ───────────────────────────────────────────────────────────────
@@ -95,6 +102,14 @@ if "messages" not in st.session_state:
     st.session_state["messages"] = []
 if "pending_query" not in st.session_state:
     st.session_state["pending_query"] = ""
+if "awaiting_answer" not in st.session_state:
+    st.session_state["awaiting_answer"] = ""
+if "agent_session_id" not in st.session_state:
+    # The agent keeps per-session conversation memory so a follow-up like
+    # "which one should I prioritise?" resolves to the stores just discussed.
+    # A fixed id would share that memory across every browser tab, so each
+    # Streamlit session gets its own.
+    st.session_state["agent_session_id"] = f"streamlit-{uuid4()}"
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -129,6 +144,11 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat History", use_container_width=True, key="clear_chat"):
         st.session_state["messages"] = []
         st.session_state["pending_query"] = ""
+        st.session_state["awaiting_answer"] = ""
+        # Clear the agent's memory of this conversation too, or a follow-up
+        # after "clear" would still resolve against the cleared turns.
+        reset_session(st.session_state["agent_session_id"])
+        st.session_state["agent_session_id"] = f"streamlit-{uuid4()}"
         st.rerun()
 
     st.caption("📦 Dataset: Rossmann Store Sales")
@@ -182,63 +202,135 @@ for msg in st.session_state["messages"]:
             citation_card(msg["sources"])
 
 # ── Chat Input ────────────────────────────────────────────────────────────────
-# Handle pending query from chip click first
-prompt = st.session_state.pop("pending_query", "") or st.chat_input(
+# st.chat_input is rendered unconditionally. It used to sit on the right-hand
+# side of an `or`, so clicking an example chip short-circuited it away and the
+# input box vanished from the page for that run.
+typed_query = st.chat_input(
     "Ask anything about your stores… e.g. 'Which store should I focus on next week?'",
     key="chat_input",
 )
+prompt = st.session_state.pop("pending_query", "") or typed_query
 
 if prompt:
-    # Add user message to history
+    # The user's message is committed to history and the script re-runs before
+    # the (slow) agent call starts. Previously both messages were appended only
+    # after the call returned, so submitting a second question mid-answer — or
+    # any failure during it — discarded the exchange and the visible text
+    # disappeared.
     st.session_state["messages"].append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
+    st.session_state["awaiting_answer"] = prompt
+    st.rerun()
 
-    # Stream assistant response
+# ── Generate the pending answer ───────────────────────────────────────────────
+if st.session_state.get("awaiting_answer"):
+    question = st.session_state.pop("awaiting_answer")
+
     with st.chat_message("assistant", avatar="🤖"):
         response_placeholder = st.empty()
         full_response = ""
         sources: list[str] = []
 
+        status_placeholder = st.empty()
+
         try:
-            with st.spinner("Analysing your stores…"):
-                for chunk in run_agent_stream(prompt, session_id="streamlit_session"):
-                    full_response += chunk
-                    response_placeholder.markdown(full_response + "▌")
+            # The agent runs on a worker thread so this one can keep repainting
+            # a live elapsed timer and the current stage. A silent spinner for
+            # several seconds reads as a hang; showing "Running the 7-day
+            # forecast · 2.4s" shows the thing is working and where the time
+            # goes.
+            answer: dict = {}
+            stages: Queue = Queue()
+            drafts: Queue = Queue()
+            # Read on the main thread: st.session_state has no session context
+            # inside a worker, and touching it there warns or raises.
+            agent_session_id = st.session_state["agent_session_id"]
 
+            def _run() -> None:
+                try:
+                    with progress_reporting(stages.put, on_draft=drafts.put):
+                        answer["text"] = run_agent(question, session_id=agent_session_id)
+                except Exception as exc:  # surfaced on the main thread below
+                    answer["error"] = exc
+
+            worker = threading.Thread(target=_run, daemon=True)
+            started = time.perf_counter()
+            worker.start()
+
+            stage, draft = "Starting", ""
+            while worker.is_alive():
+                try:
+                    stage = stages.get(timeout=0.1)
+                except Empty:
+                    pass
+                if not draft:
+                    try:
+                        draft = drafts.get_nowait()
+                    except Empty:
+                        pass
+                    else:
+                        # The grounded answer, on screen in well under a second.
+                        # The model is still writing; what replaces this is the
+                        # same facts in better prose.
+                        response_placeholder.markdown(draft)
+                status_placeholder.caption(
+                    f"{'✨ Refining' if draft else '⏳ ' + stage}… "
+                    f"**{time.perf_counter() - started:.1f}s**"
+                )
+            worker.join()
+            elapsed = time.perf_counter() - started
+
+            if answer.get("error"):
+                raise answer["error"]
+
+            full_response = answer.get("text", "")
+
+            # Typed out rather than dumped, so a long answer starts reading
+            # immediately. The text is already complete and already validated
+            # at this point — nothing unchecked is ever on screen.
+            if not draft:
+                shown = ""
+                for i, word in enumerate(full_response.split(" ")):
+                    shown += word + " "
+                    if i % 6 == 0:
+                        response_placeholder.markdown(shown + "▌")
             response_placeholder.markdown(full_response)
+            status_placeholder.caption(f"✅ Answered in **{elapsed:.1f}s**")
 
-            # Parse out any [Sources] block that the agent appended
-            if "[Sources]" in full_response or "Sources:" in full_response:
-                marker = "[Sources]" if "[Sources]" in full_response else "Sources:"
-                parts = full_response.split(marker)
-                if len(parts) > 1:
-                    raw_sources = parts[-1].strip().split("\n")
-                    sources = [s.strip("- •*").strip() for s in raw_sources if s.strip()]
-
-            # Fallback citation when no sources parsed but response is real
-            if not sources and not USE_MOCKS:
+            # Citations are only ever what the agent actually reported. There
+            # used to be a fallback that invented two source names when none
+            # were parsed, which attributed data to functions that may never
+            # have run.
+            if "Sources:" in full_response:
+                tail = full_response.split("Sources:")[-1]
                 sources = [
-                    "database.get_store_metrics",
-                    "database.get_promo_history",
+                    line.strip("- •*").strip()
+                    for line in tail.strip().splitlines()
+                    if line.strip("- •*").strip()
                 ]
 
             if sources:
                 citation_card(sources)
 
-        except Exception as exc:
+        except Exception:
+            # The detail goes to the server log, not to the user: exception
+            # text can carry SQL, file paths and schema details.
+            logger.exception("AI Assistant failed to answer: %r", question)
             full_response = (
-                "⚠️ The AI assistant encountered an error. Please try again.\n\n"
-                f"_(Technical detail: {exc})_"
+                "⚠️ I couldn't process that request. Please try asking about store "
+                "sales, forecasts, promotions, or which stores need attention."
             )
             response_placeholder.markdown(full_response)
+            status_placeholder.empty()
 
-    # Save to history
-    st.session_state["messages"].append({
-        "role": "assistant",
-        "content": full_response,
-        "sources": sources,
-    })
+        finally:
+            # finally, not the try body: Streamlit raises a BaseException to
+            # stop the script when the user submits again mid-answer, so this
+            # is what guarantees the exchange is still saved.
+            st.session_state["messages"].append({
+                "role": "assistant",
+                "content": full_response or "⚠️ That answer didn't finish. Please ask again.",
+                "sources": sources,
+            })
 
 # ── Empty state when no messages yet ─────────────────────────────────────────
 if not st.session_state["messages"]:

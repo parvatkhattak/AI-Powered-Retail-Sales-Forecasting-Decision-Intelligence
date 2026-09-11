@@ -189,6 +189,43 @@ def get_all_stores() -> pd.DataFrame:
         df = pd.read_sql(query, conn)
     return df
 
+def get_store_sales_ranking(top_n: int = 10, ascending: bool = False) -> pd.DataFrame:
+    """Stores ranked by average daily sales.
+
+    ascending=False gives the best performers, True gives the worst. Added for
+    the assistant: get_eda_summary() only reports the single best and single
+    worst store, so "top 10 stores" had no function to call.
+
+    Returns columns: Store, avg_daily_sales, total_sales, days_trading.
+    """
+    if USE_MOCKS:
+        rows = [
+            {"Store": 100, "avg_daily_sales": 9000.0, "total_sales": 2700000.0, "days_trading": 300},
+            {"Store": 200, "avg_daily_sales": 7500.0, "total_sales": 2250000.0, "days_trading": 300},
+            {"Store": 300, "avg_daily_sales": 6000.0, "total_sales": 1800000.0, "days_trading": 300},
+        ]
+        mock_df = pd.DataFrame(rows).sort_values("avg_daily_sales", ascending=ascending)
+        return mock_df.head(top_n).reset_index(drop=True)
+
+    top_n = max(1, min(int(top_n), 50))  # bounded: a chat answer can't show hundreds
+
+    engine = _get_engine()
+    query = text(f"""
+        SELECT
+            Store,
+            ROUND(AVG(Sales), 2) AS avg_daily_sales,
+            ROUND(SUM(Sales), 2) AS total_sales,
+            COUNT(*) AS days_trading
+        FROM sales
+        GROUP BY Store
+        ORDER BY avg_daily_sales {'ASC' if ascending else 'DESC'}
+        LIMIT :top_n
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params={"top_n": top_n})
+    return df
+
 def get_promo_uplift_ranking(top_n: int = 10) -> pd.DataFrame:
     """Stores ranked by promotional sales uplift percentage."""
     if USE_MOCKS:
@@ -437,4 +474,122 @@ def get_anomaly_flags(store_id: int, lookback_days: int = 90) -> pd.DataFrame:
             params={"store_id": store_id, "lookback_days": lookback_days},
             parse_dates=["date"],
         )
+    return df
+
+def get_dataset_bounds() -> dict:
+    """What this dataset actually covers: date range, row count, store list.
+
+    Added for the assistant's validation layer. Every "is this date supported?"
+    / "does this store exist?" check reads from here rather than hardcoding
+    2015-07-31 or 1115 somewhere in the agent — if the pipeline is re-run over
+    a different slice of data, the answers move with it.
+
+    Returns: {min_date, max_date, total_rows, total_stores, store_ids}
+    """
+    if USE_MOCKS:
+        # The mock covers the same store range and date span as the real
+        # dataset on purpose: "does Store 9999 exist?" has to give the same
+        # answer offline as it does in production, or the offline tests are
+        # testing something other than the shipped behaviour.
+        return {
+            "min_date": "2013-01-01",
+            "max_date": "2015-07-31",
+            "total_rows": 844338,
+            "total_stores": 1115,
+            "store_ids": list(range(1, 1116)),
+        }
+
+    engine = _get_engine()
+    bounds_query = text("""
+        SELECT MIN(Date) AS min_date, MAX(Date) AS max_date,
+               COUNT(*) AS total_rows, COUNT(DISTINCT Store) AS total_stores
+        FROM sales
+    """)
+    stores_query = text("SELECT DISTINCT Store FROM sales ORDER BY Store")
+
+    with engine.connect() as conn:
+        bounds = pd.read_sql(bounds_query, conn)
+        stores = pd.read_sql(stores_query, conn)
+
+    if bounds.empty or bounds["min_date"].iloc[0] is None:
+        return {"min_date": None, "max_date": None, "total_rows": 0,
+                "total_stores": 0, "store_ids": []}
+
+    row = bounds.iloc[0]
+    return {
+        "min_date": str(row["min_date"])[:10],
+        "max_date": str(row["max_date"])[:10],
+        "total_rows": int(row["total_rows"]),
+        "total_stores": int(row["total_stores"]),
+        "store_ids": [int(s) for s in stores["Store"].tolist()],
+    }
+
+def get_fleet_trend_screen(limit: int = 15, window_days: int = 30,
+                           min_days: int = 10) -> pd.DataFrame:
+    """Stores with the weakest recent sales trend, cheapest-first screening.
+
+    Added for fleet-wide risk questions ("which stores are most at risk?").
+    Scoring all 1,115 stores with the full risk methodology means 1,115
+    forecasts, which is minutes of work — so this narrows the field in one SQL
+    pass over the whole fleet, and the caller runs the real risk methodology on
+    the shortlist only.
+
+    Compares each store's average daily sales over the last `window_days`
+    trading days against the `window_days` before that, worst trend first.
+    Every row is a real store with real history: nothing here estimates.
+
+    Returns columns: Store, recent_avg_sales, prior_avg_sales, trend_pct, recent_days.
+    """
+    if USE_MOCKS:
+        rows = [
+            {"Store": 200, "recent_avg_sales": 6800.0, "prior_avg_sales": 7900.0,
+             "trend_pct": -13.92, "recent_days": 26},
+            {"Store": 300, "recent_avg_sales": 7100.0, "prior_avg_sales": 7500.0,
+             "trend_pct": -5.33, "recent_days": 26},
+            {"Store": 100, "recent_avg_sales": 8300.0, "prior_avg_sales": 8400.0,
+             "trend_pct": -1.19, "recent_days": 26},
+            {"Store": 400, "recent_avg_sales": 8400.0, "prior_avg_sales": 8300.0,
+             "trend_pct": 1.20, "recent_days": 26},
+            {"Store": 500, "recent_avg_sales": 6400.0, "prior_avg_sales": 6300.0,
+             "trend_pct": 1.59, "recent_days": 26},
+        ]
+        return pd.DataFrame(rows).head(limit).reset_index(drop=True)
+
+    limit = max(1, min(int(limit), 50))
+
+    engine = _get_engine()
+    query = text("""
+        WITH bounds AS (SELECT MAX(Date) AS last_date FROM sales),
+        recent AS (
+            SELECT Store, AVG(Sales) AS recent_avg_sales, COUNT(*) AS recent_days
+            FROM sales, bounds
+            WHERE Date > date(bounds.last_date, '-' || :window || ' days')
+            GROUP BY Store
+        ),
+        prior AS (
+            SELECT Store, AVG(Sales) AS prior_avg_sales, COUNT(*) AS prior_days
+            FROM sales, bounds
+            WHERE Date > date(bounds.last_date, '-' || :double_window || ' days')
+              AND Date <= date(bounds.last_date, '-' || :window || ' days')
+            GROUP BY Store
+        )
+        SELECT r.Store,
+               ROUND(r.recent_avg_sales, 2) AS recent_avg_sales,
+               ROUND(p.prior_avg_sales, 2)  AS prior_avg_sales,
+               ROUND((r.recent_avg_sales - p.prior_avg_sales) / p.prior_avg_sales * 100, 2) AS trend_pct,
+               r.recent_days
+        FROM recent r
+        JOIN prior p ON p.Store = r.Store
+        WHERE p.prior_avg_sales > 0
+          AND r.recent_days >= :min_days
+          AND p.prior_days   >= :min_days
+        ORDER BY trend_pct ASC
+        LIMIT :limit
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params={
+            "window": window_days, "double_window": window_days * 2,
+            "min_days": min_days, "limit": limit,
+        })
     return df

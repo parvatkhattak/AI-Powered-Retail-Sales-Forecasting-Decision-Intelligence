@@ -35,6 +35,12 @@ LLM_MODEL      = os.getenv("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
 LLM_BASE_URL   = "https://openrouter.ai/api/v1"
 LLM_API_KEY    = os.getenv("OPENROUTER_API_KEY", "")
 LLM_TEMPERATURE = 0                                    # Deterministic = no invented numbers
+# Generation was unbounded, and an unbounded free-tier model narrates every row
+# it is handed — one answer listed six months of totals in full. The answer
+# itself is a short summary, so this is headroom, not a target; agent_graph
+# scales it up for multi-part questions and falls back to the grounded template
+# if a reply ever comes back truncated.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "500"))
 
 # ── Model Hyperparameters ──────────────────────────────────────────────────────
 FORECAST_DAYS   = 7
