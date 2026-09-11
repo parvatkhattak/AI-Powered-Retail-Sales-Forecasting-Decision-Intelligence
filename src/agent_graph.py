@@ -593,15 +593,52 @@ def _performance_section(step: dict, grounding: rv.Grounding) -> str:
     return ""
 
 
+def _store_performance_facts(store_id: int, metric_rows: list[dict],
+                             promo: dict | None) -> dict:
+    """The handful of figures a performance answer is actually made of.
+
+    One place computes them, and both consumers read from here: the
+    deterministic renderer below, and the compact context handed to the LLM.
+    Sending the raw daily rows instead was costing ~13k input tokens on a
+    five-store question — most of the latency, for numbers no writer needs.
+    """
+    sales = [
+        r["sales"] for r in metric_rows
+        if r.get("store_id") == store_id and r.get("sales") is not None
+    ]
+    if not sales:
+        return {}
+
+    midpoint = len(sales) // 2
+    earlier, recent = sales[:midpoint], sales[midpoint:]
+    if midpoint and sum(earlier):
+        trend = (sum(recent) / len(recent) - sum(earlier) / len(earlier)) / (sum(earlier) / len(earlier)) * 100
+    else:
+        trend = None
+
+    facts = {
+        "store_id": store_id,
+        "days_counted": len(sales),
+        "avg_daily_sales": round(sum(sales) / len(sales), 2),
+        "trend_pct": round(trend, 2) if trend is not None else None,
+        "best_day_sales": round(max(sales), 2),
+        "quietest_day_sales": round(min(sales), 2),
+    }
+    if promo:
+        facts.update({
+            "promo_uplift_pct": promo.get("uplift_pct"),
+            "promo_avg_sales": promo.get("promo_avg_sales"),
+            "non_promo_avg_sales": promo.get("non_promo_avg_sales"),
+        })
+    return facts
+
+
 def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: dict | None,
                                  grounding: rv.Grounding, promo_only: bool = False) -> str:
     """Plain-language performance summary for one store — average, direction of
     travel, promo uplift — built from rows already fetched."""
     grounding.add_store(store_id)
-    sales = [
-        r["sales"] for r in metric_rows
-        if r.get("store_id") == store_id and r.get("sales") is not None
-    ]
+    facts = _store_performance_facts(store_id, metric_rows, promo)
 
     if promo_only:
         if not promo or not promo.get("uplift_pct"):
@@ -612,24 +649,21 @@ def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: 
             f"{_money(promo.get('non_promo_avg_sales', 0), grounding)}/day without one."
         )
 
-    if not sales:
+    if not facts:
         return ""
 
-    average = sum(sales) / len(sales)
-    midpoint = len(sales) // 2
-    earlier, recent = sales[:midpoint], sales[midpoint:]
-    if midpoint and sum(earlier):
-        change = (sum(recent) / len(recent) - sum(earlier) / len(earlier)) / (sum(earlier) / len(earlier)) * 100
-        direction = "up" if change >= 0 else "down"
-        trend = f"Sales are **{direction} {_pct(abs(change), grounding)}** across that period."
-    else:
+    if facts["trend_pct"] is None:
         trend = "Not enough history yet to read a trend."
+    else:
+        direction = "up" if facts["trend_pct"] >= 0 else "down"
+        trend = f"Sales are **{direction} {_pct(abs(facts['trend_pct']), grounding)}** across that period."
 
     lines = [
-        f"**Store {store_id} is averaging {_money(average, grounding)}/day** over the last "
-        f"{_count(len(sales), grounding)} trading days.\n",
+        f"**Store {store_id} is averaging {_money(facts['avg_daily_sales'], grounding)}/day** over the last "
+        f"{_count(facts['days_counted'], grounding)} trading days.\n",
         f"- {trend}",
-        f"- Best day {_money(max(sales), grounding)}, quietest day {_money(min(sales), grounding)}",
+        f"- Best day {_money(facts['best_day_sales'], grounding)}, "
+        f"quietest day {_money(facts['quietest_day_sales'], grounding)}",
     ]
     if promo and promo.get("uplift_pct"):
         lines.append(
@@ -827,6 +861,80 @@ _PROMPT_BY_INTENT = {
 }
 
 
+# Monthly history back to 2013 is 31 rows per store, and a writer needs the
+# recent shape, not the archive.
+_MAX_TREND_MONTHS = 6
+
+
+def _llm_payload(step: dict) -> dict:
+    """What the LLM needs to write this section, and nothing else.
+
+    Strictly a subset/aggregation of `step["tool_results"]`, which is what the
+    grounding is built from — so trimming the context can never let a figure
+    through that the tools didn't produce. It only removes rows the model has
+    no use for, which is both faster and less to go wrong with.
+    """
+    intent, tool_results = step["intent"], step["tool_results"]
+
+    if intent == "performance":
+        if step["stores"] and tool_results.get("store_metrics"):
+            promo_history = tool_results.get("promo_history") or {}
+            return {
+                "stores": [
+                    facts for facts in (
+                        _store_performance_facts(sid, tool_results["store_metrics"],
+                                                 promo_history.get(sid))
+                        for sid in step["stores"]
+                    ) if facts
+                ],
+                "recent_monthly_trend": {
+                    sid: rows[-_MAX_TREND_MONTHS:]
+                    for sid, rows in (tool_results.get("sales_trend") or {}).items()
+                },
+            }
+        return {key: value for key, value in tool_results.items()
+                if key in ("fleet_request", "sales_ranking", "promo_ranking", "eda_summary")}
+
+    if intent == "forecast":
+        forecasts = {}
+        for sid, rows in (tool_results.get("forecast") or {}).items():
+            values = [r["PredictedSales"] for r in rows]
+            forecasts[sid] = {
+                "daily": rows,
+                "average_daily": round(sum(values) / len(values), 2) if values else 0,
+                "window_total": round(sum(values), 2),
+            }
+        # baseline_comparison is charted on the Forecasting page, not narrated
+        # here, so it is 21 rows of context the answer never refers to.
+        return {"forecast": forecasts, "top_drivers": tool_results.get("shap") or {},
+                "no_forecast": tool_results.get("no_forecast") or {}}
+
+    if intent == "whatif":
+        return {
+            "whatif": {
+                sid: {k: v for k, v in sim.items() if not k.endswith("_daily")}
+                for sid, sim in (tool_results.get("whatif") or {}).items()
+            },
+            "no_forecast": tool_results.get("no_forecast") or {},
+            "promo_history": tool_results.get("promo_history") or {},
+        }
+
+    if intent == "recommend":
+        report = tool_results.get("decision_report") or {}
+        return {
+            "summary": report.get("summary"),
+            "ranked_stores": [
+                {k: v for k, v in entry.items() if k != "data_sources"}
+                for entry in report.get("ranked_stores", [])
+            ] or None,
+            **{k: v for k, v in report.items()
+               if k in ("observation", "prediction", "evidence", "recommendation",
+                        "risk_level", "risk_score", "urgency")},
+        }
+
+    return tool_results
+
+
 def _llm_context(state: AgentState) -> dict:
     """Everything the LLM is allowed to know: the tool output, and the limits
     the validation layer established. It gets no tools and no database."""
@@ -837,7 +945,7 @@ def _llm_context(state: AgentState) -> dict:
             for step in state.get("steps") or []
         ],
         "tool_results": [
-            {"intent": step["intent"], "stores": step["stores"], "data": step["tool_results"]}
+            {"intent": step["intent"], "stores": step["stores"], "data": _llm_payload(step)}
             for step in state.get("steps") or []
         ],
         "must_tell_the_user": [f.message for f in (result.findings if result else [])],
