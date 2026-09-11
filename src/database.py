@@ -475,3 +475,51 @@ def get_anomaly_flags(store_id: int, lookback_days: int = 90) -> pd.DataFrame:
             parse_dates=["date"],
         )
     return df
+
+def get_dataset_bounds() -> dict:
+    """What this dataset actually covers: date range, row count, store list.
+
+    Added for the assistant's validation layer. Every "is this date supported?"
+    / "does this store exist?" check reads from here rather than hardcoding
+    2015-07-31 or 1115 somewhere in the agent — if the pipeline is re-run over
+    a different slice of data, the answers move with it.
+
+    Returns: {min_date, max_date, total_rows, total_stores, store_ids}
+    """
+    if USE_MOCKS:
+        # The mock covers the same store range and date span as the real
+        # dataset on purpose: "does Store 9999 exist?" has to give the same
+        # answer offline as it does in production, or the offline tests are
+        # testing something other than the shipped behaviour.
+        return {
+            "min_date": "2013-01-01",
+            "max_date": "2015-07-31",
+            "total_rows": 844338,
+            "total_stores": 1115,
+            "store_ids": list(range(1, 1116)),
+        }
+
+    engine = _get_engine()
+    bounds_query = text("""
+        SELECT MIN(Date) AS min_date, MAX(Date) AS max_date,
+               COUNT(*) AS total_rows, COUNT(DISTINCT Store) AS total_stores
+        FROM sales
+    """)
+    stores_query = text("SELECT DISTINCT Store FROM sales ORDER BY Store")
+
+    with engine.connect() as conn:
+        bounds = pd.read_sql(bounds_query, conn)
+        stores = pd.read_sql(stores_query, conn)
+
+    if bounds.empty or bounds["min_date"].iloc[0] is None:
+        return {"min_date": None, "max_date": None, "total_rows": 0,
+                "total_stores": 0, "store_ids": []}
+
+    row = bounds.iloc[0]
+    return {
+        "min_date": str(row["min_date"])[:10],
+        "max_date": str(row["max_date"])[:10],
+        "total_rows": int(row["total_rows"]),
+        "total_stores": int(row["total_stores"]),
+        "store_ids": [int(s) for s in stores["Store"].tolist()],
+    }
