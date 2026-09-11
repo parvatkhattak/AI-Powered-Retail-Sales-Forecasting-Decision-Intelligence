@@ -184,10 +184,19 @@ with st.spinner("Computing SHAP values…"):
         shap_ok = False
 
 if shap_ok and shap_list:
-    shap_df = pd.DataFrame(shap_list[:15])
+    if isinstance(shap_list, dict):
+        shap_df = pd.DataFrame([
+            {"feature": feat, "shap_value": info.get("value", 0.0) if isinstance(info, dict) else float(info)}
+            for feat, info in shap_list.items()
+        ])
+    elif isinstance(shap_list, list):
+        shap_df = pd.DataFrame(shap_list[:15])
+    else:
+        shap_df = pd.DataFrame()
+
     if "importance" in shap_df.columns:
         shap_df = shap_df.rename(columns={"importance": "shap_value"})
-    if "shap_value" in shap_df.columns:
+    if not shap_df.empty and "shap_value" in shap_df.columns:
         shap_df = shap_df.sort_values("shap_value", ascending=True)
         fig_shap = go.Figure(go.Bar(
             x=shap_df["shap_value"],
