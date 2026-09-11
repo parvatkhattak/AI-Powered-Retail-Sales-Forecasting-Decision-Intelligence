@@ -199,9 +199,27 @@ def _get_artifacts():
     if not _ARTIFACTS:
         _ARTIFACTS["model"] = joblib.load(LGBM_PATH)
         _ARTIFACTS["feature_cols"] = joblib.load(FEATURE_COLS_PATH)
-        _ARTIFACTS["medians"] = joblib.load(MEDIANS_PATH)
+        # Gracefully handle pandas version mismatch when loading medians pkl
+        # (saved with pandas 2.2+ StringDtype, may be loaded on 2.1.x)
+        try:
+            _ARTIFACTS["medians"] = joblib.load(MEDIANS_PATH)
+        except (TypeError, Exception):
+            import sqlite3
+            import warnings
+            warnings.warn(
+                "impute_medians.pkl has a pandas version mismatch — "
+                "recomputing medians from retail.db (run train_model() to regenerate).",
+                RuntimeWarning,
+            )
+            conn = sqlite3.connect(DB_PATH)
+            df_med = pd.read_sql("SELECT CompetitionDistance, CompetitionOpenMonths, "
+                                 "DaysSinceLastPromo, DaysUntilNextPromo FROM sales LIMIT 50000",
+                                 conn)
+            conn.close()
+            _ARTIFACTS["medians"] = df_med.median()
         _ARTIFACTS["rmspe"] = json.load(open(METRICS_PATH))["lightgbm"]["rmspe"] if METRICS_PATH.exists() else 0.15
     return _ARTIFACTS["model"], _ARTIFACTS["feature_cols"], _ARTIFACTS["medians"], _ARTIFACTS["rmspe"]
+
 
 
 def _promo_timing(dates: pd.Series, promo: pd.Series):
