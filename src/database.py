@@ -189,6 +189,43 @@ def get_all_stores() -> pd.DataFrame:
         df = pd.read_sql(query, conn)
     return df
 
+def get_store_sales_ranking(top_n: int = 10, ascending: bool = False) -> pd.DataFrame:
+    """Stores ranked by average daily sales.
+
+    ascending=False gives the best performers, True gives the worst. Added for
+    the assistant: get_eda_summary() only reports the single best and single
+    worst store, so "top 10 stores" had no function to call.
+
+    Returns columns: Store, avg_daily_sales, total_sales, days_trading.
+    """
+    if USE_MOCKS:
+        rows = [
+            {"Store": 100, "avg_daily_sales": 9000.0, "total_sales": 2700000.0, "days_trading": 300},
+            {"Store": 200, "avg_daily_sales": 7500.0, "total_sales": 2250000.0, "days_trading": 300},
+            {"Store": 300, "avg_daily_sales": 6000.0, "total_sales": 1800000.0, "days_trading": 300},
+        ]
+        mock_df = pd.DataFrame(rows).sort_values("avg_daily_sales", ascending=ascending)
+        return mock_df.head(top_n).reset_index(drop=True)
+
+    top_n = max(1, min(int(top_n), 50))  # bounded: a chat answer can't show hundreds
+
+    engine = _get_engine()
+    query = text(f"""
+        SELECT
+            Store,
+            ROUND(AVG(Sales), 2) AS avg_daily_sales,
+            ROUND(SUM(Sales), 2) AS total_sales,
+            COUNT(*) AS days_trading
+        FROM sales
+        GROUP BY Store
+        ORDER BY avg_daily_sales {'ASC' if ascending else 'DESC'}
+        LIMIT :top_n
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params={"top_n": top_n})
+    return df
+
 def get_promo_uplift_ranking(top_n: int = 10) -> pd.DataFrame:
     """Stores ranked by promotional sales uplift percentage."""
     if USE_MOCKS:

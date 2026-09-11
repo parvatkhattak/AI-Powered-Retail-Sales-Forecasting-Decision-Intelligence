@@ -133,13 +133,50 @@ def _mentions_more_stores_than_analysed(query: str) -> bool:
     return len(mentioned) > _MAX_STORES_PER_QUERY
 
 
+# Fleet-level questions (no store ID named) used to have exactly one handler —
+# get_eda_summary() — so "top 10 performers", "average sales" and "best store"
+# all returned the same paragraph. These decide which fleet report to run.
+_RANKING_RE = re.compile(r"\b(top|bottom|best|worst|highest|lowest|rank(?:ed|ing)?)\b", re.IGNORECASE)
+_WORST_RE = re.compile(r"\b(bottom|worst|lowest|underperform\w*|weakest)\b", re.IGNORECASE)
+_PROMO_RE = re.compile(r"\b(promo\w*|uplift)\b", re.IGNORECASE)
+_COUNT_RE = re.compile(r"\b(?:top|bottom|best|worst|first|last)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:stores?|performers?)\b", re.IGNORECASE)
+
+_DEFAULT_RANKING_SIZE = 10
+_MAX_RANKING_SIZE = 25
+
+
+def _parse_fleet_request(query: str) -> dict:
+    """Work out which fleet-wide report a store-less question is asking for."""
+    wants_ranking = bool(_RANKING_RE.search(query))
+    match = _COUNT_RE.search(query)
+    requested = next((int(g) for g in (match.groups() if match else []) if g), None)
+
+    if _PROMO_RE.search(query) and wants_ranking:
+        kind = "promo_ranking"
+    elif wants_ranking or requested is not None:
+        kind = "sales_ranking"
+    else:
+        kind = "summary"
+
+    return {
+        "kind": kind,
+        "n": min(requested or _DEFAULT_RANKING_SIZE, _MAX_RANKING_SIZE),
+        "ascending": bool(_WORST_RE.search(query)),
+    }
+
+
 def _is_in_scope(query: str, store_ids: list[int]) -> bool:
     """A named store always counts; otherwise the question has to be
     recognisably about this retail dataset."""
     if store_ids:
         return True
     q = query.lower()
-    return any(term in q for term in _RETAIL_VOCAB)
+    if any(term in q for term in _RETAIL_VOCAB):
+        return True
+    # "top 15" / "bottom 5" on its own is ranking phrasing, which in a store
+    # analytics tool means stores — without this, a bare "top 15" was refused
+    # as off-topic.
+    return bool(_COUNT_RE.search(query) and _RANKING_RE.search(query))
 
 
 def _classify_intent_fallback(query: str, store_ids: list[int]) -> Intent:
@@ -248,8 +285,22 @@ def data_analyst_node(state: AgentState) -> dict:
         }
         sources = ["database.get_store_metrics", "database.get_promo_history", "database.get_sales_trend"]
     else:
-        tool_results["eda_summary"] = database.get_eda_summary()
-        sources = ["database.get_eda_summary"]
+        # No store named: pick the fleet-wide report that matches the question,
+        # instead of always returning the same overall summary.
+        request = _parse_fleet_request(state.get("query", ""))
+        tool_results["fleet_request"] = request
+
+        if request["kind"] == "promo_ranking":
+            ranking = database.get_promo_uplift_ranking(top_n=request["n"])
+            tool_results["promo_ranking"] = ranking.to_dict(orient="records")
+            sources = ["database.get_promo_uplift_ranking"]
+        elif request["kind"] == "sales_ranking":
+            ranking = database.get_store_sales_ranking(top_n=request["n"], ascending=request["ascending"])
+            tool_results["sales_ranking"] = ranking.to_dict(orient="records")
+            sources = ["database.get_store_sales_ranking"]
+        else:
+            tool_results["eda_summary"] = database.get_eda_summary()
+            sources = ["database.get_eda_summary"]
 
     return {"tool_results": tool_results, "data_sources": sources}
 
@@ -359,6 +410,28 @@ def _compose_fallback(state: AgentState) -> str:
             f"📊 **Evidence:** {report['evidence']}\n\n"
             f"✅ **Recommendation:** {report['recommendation']}"
         )
+
+    if tool_results.get("sales_ranking"):
+        rows = tool_results["sales_ranking"]
+        request = tool_results.get("fleet_request", {})
+        label = "Lowest" if request.get("ascending") else "Top"
+        lines = [f"**{label} {len(rows)} stores by average daily sales:**\n"]
+        lines += [
+            f"{i}. **Store {r['Store']}** — €{r['avg_daily_sales']:,.0f}/day "
+            f"(€{r['total_sales']:,.0f} total over {r['days_trading']:,} trading days)"
+            for i, r in enumerate(rows, start=1)
+        ]
+        return "\n".join(lines)
+
+    if tool_results.get("promo_ranking"):
+        rows = tool_results["promo_ranking"]
+        lines = [f"**Top {len(rows)} stores by promotional uplift:**\n"]
+        lines += [
+            f"{i}. **Store {r['Store']}** — {r['uplift_pct']:.1f}% uplift "
+            f"(promo €{r['promo_avg_sales']:,.0f}/day vs non-promo €{r['non_promo_avg_sales']:,.0f}/day)"
+            for i, r in enumerate(rows, start=1)
+        ]
+        return "\n".join(lines)
 
     if tool_results.get("eda_summary"):
         s = tool_results["eda_summary"]

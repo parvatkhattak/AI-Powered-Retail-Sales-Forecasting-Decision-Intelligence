@@ -238,6 +238,51 @@ def test_real_mode_missing_db_returns_friendly_error_not_a_crash(monkeypatch, tm
         assert leak not in response
 
 
+@pytest.mark.parametrize(
+    "query,expected_kind,expected_n,expected_ascending",
+    [
+        ("top 10 performers in order", "sales_ranking", 10, False),
+        ("top 15", "sales_ranking", 15, False),
+        ("bottom 5 stores", "sales_ranking", 5, True),
+        ("worst performing store", "sales_ranking", 10, True),
+        ("best performing store", "sales_ranking", 10, False),
+        ("which stores have the highest promo uplift?", "promo_ranking", 10, False),
+        ("average sales", "summary", 10, False),
+        ("how are we doing overall across the fleet?", "summary", 10, False),
+        ("top 500 stores", "sales_ranking", 25, False),   # clamped to the cap
+    ],
+)
+def test_fleet_questions_are_routed_to_different_reports(query, expected_kind, expected_n, expected_ascending):
+    """Every store-less question used to call get_eda_summary(), so "top 10
+    performers", "average sales" and "best store" all returned one identical
+    paragraph. Each shape now picks its own report."""
+    request = agent_graph._parse_fleet_request(query)
+    assert request["kind"] == expected_kind
+    assert request["n"] == expected_n
+    assert request["ascending"] is expected_ascending
+
+
+def test_fleet_questions_produce_different_answers():
+    """The user-visible version of the same bug."""
+    queries = [
+        "top 10 performers in order",
+        "bottom 5 stores",
+        "which stores have the highest promo uplift?",
+        "average sales",
+    ]
+    answers = {q: agent_graph.run_agent(q) for q in queries}
+    assert len(set(answers.values())) == len(queries), (
+        "fleet questions collapsed to the same answer:\n"
+        + "\n".join(f"  {q!r} -> {a[:60]!r}" for q, a in answers.items())
+    )
+
+
+def test_bare_ranking_phrasing_is_in_scope():
+    """"top 15" has no retail vocabulary in it, and was refused as off-topic."""
+    assert agent_graph._is_in_scope("top 15", []) is True
+    assert agent_graph._classify_intent_fallback("top 15", []) != "out_of_scope"
+
+
 def test_build_graph_compiles():
     graph = agent_graph.build_graph()
     assert graph is not None
