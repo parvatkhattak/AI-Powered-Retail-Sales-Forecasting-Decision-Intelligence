@@ -365,7 +365,7 @@ def get_promo2_effectiveness() -> pd.DataFrame:
     engine = _get_engine()
     query = text("""
         SELECT Store,
-               CASE WHEN Promo2 = 1 AND IsPromoMonth = 1 THEN 1 ELSE 0 END AS has_promo2,
+               CASE WHEN Promo2 = 1 AND IsPromo2Active = 1 THEN 1 ELSE 0 END AS has_promo2,
                AVG(Sales) AS avg_sales
         FROM sales
         GROUP BY Store, has_promo2
