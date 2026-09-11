@@ -43,6 +43,14 @@ def _days_since_last_promo(metrics_df) -> int | None:
     return int((metrics_df["date"].max() - last_promo_date).days)
 
 
+# Each risk level maps to exactly one urgency, and each urgency to one shape of
+# advice. Keeping the mapping in one table is what stops a store being called
+# "MEDIUM risk" and "stable — no urgent action needed" in the same breath: the
+# recommendation is derived from the level rather than written independently of it.
+URGENCY_BY_LEVEL = {"HIGH": "act_now", "MEDIUM": "monitor", "LOW": "none"}
+ACTION_REQUIRED = {"act_now": True, "monitor": True, "none": False}
+
+
 def _risk_score(trend_pct: float, forecast_vs_avg_pct: float, days_since_promo: int | None) -> tuple[str, float]:
     """Composite score across trend, forecast weakness, and unused promo potential."""
     score = 0.0
@@ -54,6 +62,57 @@ def _risk_score(trend_pct: float, forecast_vs_avg_pct: float, days_since_promo: 
         score += 20
     level = "HIGH" if score >= 50 else "MEDIUM" if score >= 20 else "LOW"
     return level, round(score, 2)
+
+
+def _risk_drivers(trend_pct: float, forecast_vs_avg_pct: float, days_since_promo: int | None) -> list[str]:
+    """Which signals actually pushed the score up — so the recommendation can
+    name the reason instead of asserting a risk level with nothing behind it."""
+    drivers = []
+    if trend_pct < 0:
+        drivers.append(f"sales trending down {abs(trend_pct)}% over the window")
+    if forecast_vs_avg_pct < 0:
+        drivers.append(f"next week forecast {abs(forecast_vs_avg_pct)}% below its own average")
+    if days_since_promo and days_since_promo > 14:
+        drivers.append(f"{days_since_promo} days since the last promotion")
+    return drivers
+
+
+def _recommendation(store_id: int, risk_level: str, drivers: list[str],
+                    days_since_promo: int | None, uplift_pct: float) -> str:
+    """The advice for one store, derived from its risk level.
+
+    MEDIUM used to fall into the same branch as LOW and produce "stable — no
+    urgent action needed", which then got quoted as the priority store's
+    recommendation in a comparison. A MEDIUM store is not stable; it gets a
+    watch action, and only LOW gets "nothing to do".
+    """
+    reason = drivers[0] if drivers else "no negative signals in the current window"
+
+    if risk_level == "HIGH":
+        if days_since_promo and days_since_promo > 14 and uplift_pct > 0:
+            return (
+                f"Act this week on Store {store_id}: schedule a promotion. "
+                f"A historical uplift of {uplift_pct}% and {days_since_promo} days since "
+                f"the last promo make it the highest-value lever available."
+            )
+        return (
+            f"Act this week on Store {store_id}: investigate the decline — "
+            f"{'; '.join(drivers) if drivers else 'trend and forecast are both weak'}."
+        )
+
+    if risk_level == "MEDIUM":
+        if days_since_promo and days_since_promo > 14 and uplift_pct > 0:
+            return (
+                f"Watch Store {store_id} this week — {reason}. A promotion is the "
+                f"obvious lever if it slips further ({uplift_pct}% historical uplift), "
+                f"but nothing here needs emergency action yet."
+            )
+        return (
+            f"Watch Store {store_id} this week — {reason}. Worth a check-in, "
+            f"but nothing here needs emergency action yet."
+        )
+
+    return f"No action needed for Store {store_id} — no weakening signals in the current window."
 
 
 def generate_decision_report(store_id: int) -> dict:
@@ -83,6 +142,7 @@ def generate_decision_report(store_id: int) -> dict:
 
     days_since_promo = _days_since_last_promo(metrics)
     risk_level, risk_score = _risk_score(trend_pct, forecast_vs_avg_pct, days_since_promo)
+    drivers = _risk_drivers(trend_pct, forecast_vs_avg_pct, days_since_promo)
 
     if metrics.empty:
         observation = f"No historical sales data available for Store {store_id}."
@@ -113,15 +173,8 @@ def generate_decision_report(store_id: int) -> dict:
     else:
         evidence = f"Promo uplift for this store is {uplift_pct}%."
 
-    if risk_level == "HIGH" and days_since_promo and days_since_promo > 14 and uplift_pct > 0:
-        recommendation = (
-            f"Priority: Store {store_id}. Activate a promotion next week — a historical uplift of "
-            f"{uplift_pct}% and {days_since_promo} days since the last promo support this action."
-        )
-    elif risk_level == "HIGH":
-        recommendation = f"Priority: Store {store_id}. Investigate the sales decline — both trend and forecast are weak."
-    else:
-        recommendation = f"Store {store_id} is stable — no urgent action needed this week."
+    urgency = URGENCY_BY_LEVEL[risk_level]
+    recommendation = _recommendation(store_id, risk_level, drivers, days_since_promo, uplift_pct)
 
     return {
         "store_id": store_id,
@@ -131,10 +184,43 @@ def generate_decision_report(store_id: int) -> dict:
         "recommendation": recommendation,
         "risk_level": risk_level,
         "risk_score": risk_score,
+        "urgency": urgency,
+        "action_required": ACTION_REQUIRED[urgency],
+        "risk_drivers": drivers,
         "trend_pct": trend_pct,
         "forecast_avg_sales": forecast_avg,
         "data_sources": sources,
     }
+
+
+def _comparison_summary(ranked: list[dict]) -> str:
+    """One sentence about the group, phrased to match the top store's urgency.
+
+    The old version was f"Priority: Store {id}. {recommendation}", which for a
+    non-HIGH store produced "Priority: Store 200. Store 200 is stable — no
+    urgent action needed this week." — a ranking and a recommendation flatly
+    contradicting each other in one line. The ranking is still the ranking; what
+    changes is that a top-of-list store is only called a *priority* when its own
+    risk level says action is due.
+    """
+    top = ranked[0]
+    store_id, level, score = top["store_id"], top["risk_level"], top["risk_score"]
+
+    if top["urgency"] == "act_now":
+        return f"Priority: Store {store_id} ({level} risk, score {score}). {top['recommendation']}"
+
+    if top["urgency"] == "monitor":
+        return (
+            f"Nothing in this group needs emergency action this week. Store {store_id} "
+            f"ranks first on risk ({level}, score {score}) and is the one to watch — "
+            f"{top['risk_drivers'][0] if top['risk_drivers'] else 'it leads the group on risk score'}."
+        )
+
+    return (
+        f"All {len(ranked)} stores are LOW risk this week — no action needed for any of them. "
+        f"Store {store_id} is closest to needing attention (score {score}), so start there "
+        f"if you only have time for one."
+    )
 
 
 def compare_stores_report(store_ids: list[int]) -> dict:
@@ -145,6 +231,70 @@ def compare_stores_report(store_ids: list[int]) -> dict:
     if not ranked:
         return {"ranked_stores": [], "summary": "No stores to compare."}
 
-    top = ranked[0]
-    summary = f"Priority: Store {top['store_id']}. {top['recommendation']}"
-    return {"ranked_stores": ranked, "summary": summary}
+    return {
+        "ranked_stores": ranked,
+        "summary": _comparison_summary(ranked),
+        "action_required": any(r["action_required"] for r in ranked),
+        "highest_risk_level": ranked[0]["risk_level"],
+    }
+
+
+# ── Consistency invariant ────────────────────────────────────────────────────
+
+# Phrases that assert nothing needs doing. If one of these appears in the advice
+# for a store the engine also ranked as needing action, the report contradicts
+# itself and the answer built from it will too.
+_NO_ACTION_PHRASES = ("no action needed", "no urgent action", "is stable", "nothing to do")
+_ACTION_PHRASES = ("priority:", "act this week", "investigate", "schedule a promotion")
+
+
+def check_report_consistency(report: dict) -> list[str]:
+    """Every way a report could contradict itself, as a list of violations.
+
+    Exposed rather than kept in the tests because the agent runs it on its own
+    output too: a report that fails here must never be turned into an answer.
+    """
+    violations: list[str] = []
+    stores = report.get("ranked_stores") or ([report] if "risk_level" in report else [])
+
+    for entry in stores:
+        store_id = entry.get("store_id")
+        level = entry.get("risk_level")
+        urgency = entry.get("urgency")
+        text = (entry.get("recommendation") or "").lower()
+
+        if URGENCY_BY_LEVEL.get(level) != urgency:
+            violations.append(f"Store {store_id}: risk {level} does not map to urgency {urgency!r}")
+
+        says_no_action = any(p in text for p in _NO_ACTION_PHRASES)
+        says_action = any(p in text for p in _ACTION_PHRASES)
+
+        if entry.get("action_required") and says_no_action:
+            violations.append(
+                f"Store {store_id}: ranked as needing action ({level}) but the "
+                f"recommendation says nothing needs doing"
+            )
+        if not entry.get("action_required") and says_action:
+            violations.append(
+                f"Store {store_id}: ranked LOW risk but the recommendation "
+                f"prescribes an urgent action"
+            )
+        if says_no_action and says_action:
+            violations.append(f"Store {store_id}: recommendation both prescribes and rules out action")
+
+    scores = [s.get("risk_score", 0) for s in stores]
+    if report.get("ranked_stores") and scores != sorted(scores, reverse=True):
+        violations.append(f"ranking is not ordered by risk score: {scores}")
+
+    summary = (report.get("summary") or "").lower()
+    if summary and stores:
+        top = stores[0]
+        if summary.startswith("priority:") and not top.get("action_required"):
+            violations.append(
+                f"summary calls Store {top.get('store_id')} a priority while its own "
+                f"risk level ({top.get('risk_level')}) says no action is needed"
+            )
+        if any(p in summary for p in _NO_ACTION_PHRASES) and summary.startswith("priority:"):
+            violations.append("summary both names a priority and says no action is needed")
+
+    return violations
