@@ -5,21 +5,24 @@ Owner: Dikshit — UI Developer
 Streaming chat interface powered by src/agent_graph.py.
 
 Features:
-  1. Streaming chat using run_agent_stream() with real-time token display
+  1. Streaming chat with a live elapsed timer and the agent's current stage
   2. Session message history (persists across re-runs via st.session_state)
   3. Clickable example question chips
   4. Citation cards showing which data sources backed each response
   5. Graceful error handling — agent failures show friendly message
 
 Architecture constraints:
-  - Calls ONLY run_agent_stream() and run_agent() from src/agent_graph.py
+  - Calls ONLY run_agent() from src/agent_graph.py
   - Never imports from database.py or model_engine.py directly
   - All errors wrapped in try/except — never crashes Streamlit
 """
 
 import logging
 import sys
+import threading
+import time
 from pathlib import Path
+from queue import Empty, Queue
 from uuid import uuid4
 
 import streamlit as st
@@ -30,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config import USE_MOCKS
-from src.agent_graph import reset_session, run_agent_stream
+from src.agent_graph import progress_reporting, reset_session, run_agent
 from components.ui_helpers import citation_card
 
 # ── Page Config ───────────────────────────────────────────────────────────────
@@ -227,15 +230,58 @@ if st.session_state.get("awaiting_answer"):
         full_response = ""
         sources: list[str] = []
 
-        try:
-            with st.spinner("Analysing your stores…"):
-                for chunk in run_agent_stream(
-                    question, session_id=st.session_state["agent_session_id"]
-                ):
-                    full_response += chunk
-                    response_placeholder.markdown(full_response + "▌")
+        status_placeholder = st.empty()
 
+        try:
+            # The agent runs on a worker thread so this one can keep repainting
+            # a live elapsed timer and the current stage. A silent spinner for
+            # several seconds reads as a hang; showing "Running the 7-day
+            # forecast · 2.4s" shows the thing is working and where the time
+            # goes.
+            answer: dict = {}
+            stages: Queue = Queue()
+            # Read on the main thread: st.session_state has no session context
+            # inside a worker, and touching it there warns or raises.
+            agent_session_id = st.session_state["agent_session_id"]
+
+            def _run() -> None:
+                try:
+                    with progress_reporting(stages.put):
+                        answer["text"] = run_agent(question, session_id=agent_session_id)
+                except Exception as exc:  # surfaced on the main thread below
+                    answer["error"] = exc
+
+            worker = threading.Thread(target=_run, daemon=True)
+            started = time.perf_counter()
+            worker.start()
+
+            stage = "Starting"
+            while worker.is_alive():
+                try:
+                    stage = stages.get(timeout=0.1)
+                except Empty:
+                    pass
+                status_placeholder.caption(
+                    f"⏳ {stage}… **{time.perf_counter() - started:.1f}s**"
+                )
+            worker.join()
+            elapsed = time.perf_counter() - started
+
+            if answer.get("error"):
+                raise answer["error"]
+
+            full_response = answer.get("text", "")
+
+            # Typed out rather than dumped, so a long answer starts reading
+            # immediately. The text is already complete and already validated
+            # at this point — nothing unchecked is ever on screen.
+            shown = ""
+            for i, word in enumerate(full_response.split(" ")):
+                shown += word + " "
+                if i % 6 == 0:
+                    response_placeholder.markdown(shown + "▌")
             response_placeholder.markdown(full_response)
+            status_placeholder.caption(f"✅ Answered in **{elapsed:.1f}s**")
 
             # Citations are only ever what the agent actually reported. There
             # used to be a fallback that invented two source names when none
@@ -261,6 +307,7 @@ if st.session_state.get("awaiting_answer"):
                 "sales, forecasts, promotions, or which stores need attention."
             )
             response_placeholder.markdown(full_response)
+            status_placeholder.empty()
 
         finally:
             # finally, not the try body: Streamlit raises a BaseException to

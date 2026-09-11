@@ -156,13 +156,36 @@ that read like a confident answer.
 
 ## 3c. Intent classification and the LLM
 
-Intent is decided in code, per clause. The LLM has a router prompt
-(`_classify_intent_with_llm`) and is a plain one-word completion rather than
-`with_structured_output()` — structured output needs tool/function-calling
-support, which the free OpenRouter models don't all have, and on those every
-routing call failed silently. Code has the final say either way: an LLM asked
-to pick from a fixed label set will always pick something, so scope and
-routing cannot be delegated to it.
+Intent is decided in code, per clause — an LLM asked to pick from a fixed label
+set will always pick something, so scope and routing cannot be delegated to it.
+The agent makes **exactly one LLM call per question**, in the Respond node. The
+old router round-trip was removed with the router node itself.
+
+## 3d. Latency
+
+The LLM dominates wall-clock time, so the code's job is to give it as little to
+do as possible and to show the user what is happening meanwhile.
+
+| Lever | Effect |
+|---|---|
+| `_llm_payload()` sends computed facts, not raw rows | single store 2,516 → 364 input tokens; five-store question 13,139 → 2,749 |
+| `LLM_MAX_TOKENS` (config, env-overridable) | generation was unbounded; budget scales per section via `_token_budget()`, and `_looks_truncated()` discards a reply cut off at the ceiling |
+| Prompts ask for the answer, not a narration | one live answer had listed six months of totals in full |
+| No `get_baseline_comparison()` in the chat path | a second model loaded from disk plus two recursive forecasts per store, never quoted |
+| `_read_reference_csv()` caches test.csv / store.csv | a five-store report re-read the same 1.4MB file ten times |
+| Fleet screening skips SHAP | it feeds the Evidence prose and never the score |
+
+Measured on the real database: what-if 1.6s → 0.08s, forecast 1.27s → 0.73s,
+fleet risk 8.8s → 4.5s, full test suite 123s → 79s.
+
+`progress_reporting(callback)` is a context manager that routes the current
+thread's stage messages to a listener. `pages/4_AI_Assistant.py` runs the agent
+on a worker thread and repaints a live elapsed timer and the current stage
+("Running the 7-day forecast · 2.4s"), then reports the total on completion.
+The slow paths — fleet ranking and multi-store comparison — take an optional
+`progress` callback so they can count through stores rather than freezing on
+one message. A listener that raises is swallowed: progress reporting must never
+be able to break an answer.
 
 ## 4. Why `decision_engine.py` never calls an LLM
 
@@ -368,6 +391,7 @@ this is the check.
 | `no_self_contradiction` | one store called both a priority and stable |
 | `covers_all_intents` | a stacked question answered with only one of its parts |
 | `has_sources` | citations dropped |
+| — | *(citations themselves are rewritten from the call log in `_assemble()`, never taken from the model: asked to cite "the sources you were given", one run cited the JSON key `tool_results`)* |
 | `premise_corrected` | a claim the data contradicts, repeated as fact |
 
 The deterministic composer passes `numeric_grounding` **by construction**:

@@ -670,3 +670,73 @@ def test_the_ui_still_parses_one_source_per_line_after_the_rewrite():
     assert len(parsed) >= 2
     assert all("," not in source for source in parsed)
     assert all(source.startswith(("database.", "model_engine.")) for source in parsed), parsed
+
+
+# ── Latency and live progress ────────────────────────────────────────────────
+
+def test_progress_stages_are_reported_in_order():
+    """The UI shows what the agent is doing while it works — a silent spinner
+    for several seconds reads as a hang."""
+    stages = []
+    with agent_graph.progress_reporting(stages.append):
+        agent_graph.run_agent("How is Store 100 performing?", "progress")
+
+    assert stages[0] == "Screening the request"
+    assert "Reading the question" in stages
+    assert "Checking what the data supports" in stages
+    assert any("Fetching sales history" in s for s in stages)
+    assert stages[-1] == "Writing the answer"
+
+
+def test_progress_counts_through_a_slow_fleet_ranking():
+    """The fleet ranking is the slowest query in the app, so it reports
+    per-store movement rather than one frozen message."""
+    stages = []
+    decision_engine.rank_fleet_risk(top_n=2, screen_size=3, progress=stages.append)
+
+    scoring = [s for s in stages if s.startswith("Scoring store")]
+    assert len(scoring) >= 3, stages
+    assert "1 of" in scoring[0]
+
+
+def test_a_broken_progress_listener_never_breaks_the_answer():
+    def explode(_stage):
+        raise RuntimeError("listener is broken")
+
+    with agent_graph.progress_reporting(explode):
+        response = agent_graph.run_agent("How is Store 100 performing?", "broken-listener")
+    assert "/day" in response
+
+
+def test_progress_reporting_is_scoped_to_its_block():
+    stages = []
+    with agent_graph.progress_reporting(stages.append):
+        pass
+    agent_graph.run_agent("How is Store 100 performing?", "unscoped")
+    assert stages == [], "progress leaked after the context manager exited"
+
+
+def test_token_budget_grows_with_the_number_of_sections():
+    """One answer is asked to stay brief; a stacked question legitimately needs
+    more room, so the cap is per-section rather than one flat number."""
+    single = agent_graph._token_budget(1)
+    assert single == agent_graph.LLM_MAX_TOKENS
+    assert agent_graph._token_budget(3) > single
+    assert agent_graph._token_budget(50) == agent_graph._MAX_COMPOSITION_TOKENS
+
+
+def test_a_reply_cut_off_at_the_token_limit_is_discarded(monkeypatch):
+    """Capping generation risks truncation, so a reply that stopped
+    mid-sentence is thrown away rather than shown."""
+    assert agent_graph._looks_truncated("Store 100 averaged 8,333 per day and the")
+    assert not agent_graph._looks_truncated("Store 100 averaged 8,333 per day.")
+
+    monkeypatch.setattr(agent_graph, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(agent_graph, "_compose_with_llm",
+                        lambda state, context: "Store 100 is averaging and then it")
+
+    response = agent_graph.run_agent("How is Store 100 performing?", "truncated")
+    # The grounded template answered instead — complete, and with citations.
+    assert response.rstrip().endswith(("metrics", "history", "trend"))
+    assert "and then it" not in response
+    assert "/day" in response

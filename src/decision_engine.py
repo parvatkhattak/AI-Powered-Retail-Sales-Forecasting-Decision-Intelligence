@@ -249,9 +249,13 @@ def _comparison_summary(ranked: list[dict]) -> str:
     )
 
 
-def compare_stores_report(store_ids: list[int]) -> dict:
+def compare_stores_report(store_ids: list[int], progress=None) -> dict:
     """Returns ranked priority list for multiple stores."""
-    reports = [generate_decision_report(sid) for sid in store_ids]
+    reports = []
+    for position, sid in enumerate(store_ids, start=1):
+        if progress:
+            progress(f"Scoring Store {sid} ({position} of {len(store_ids)})")
+        reports.append(generate_decision_report(sid))
     ranked = sorted(reports, key=lambda r: r["risk_score"], reverse=True)
 
     if not ranked:
@@ -334,7 +338,8 @@ def check_report_consistency(report: dict) -> list[str]:
 DEFAULT_SCREEN_SIZE = 12
 
 
-def rank_fleet_risk(top_n: int = 5, screen_size: int = DEFAULT_SCREEN_SIZE) -> dict:
+def rank_fleet_risk(top_n: int = 5, screen_size: int = DEFAULT_SCREEN_SIZE,
+                    progress=None) -> dict:
     """The stores most at risk across the whole fleet, using this project's own
     risk methodology rather than a new one.
 
@@ -362,8 +367,17 @@ def rank_fleet_risk(top_n: int = 5, screen_size: int = DEFAULT_SCREEN_SIZE) -> d
     candidates = [int(s) for s in screen["Store"].tolist()]
     # Score the shortlist without SHAP, then re-run only the stores that will
     # actually be shown with their explanations. Same score, a third of the work.
-    scored = [generate_decision_report(sid, with_explanations=False) for sid in candidates]
+    # `progress` is an optional callback the agent passes in so the UI can show
+    # movement: this loop is the slowest thing in the app, and a status line
+    # frozen on one message for five seconds reads as a hang.
+    scored = []
+    for position, sid in enumerate(candidates, start=1):
+        if progress:
+            progress(f"Scoring store {position} of {len(candidates)} (Store {sid})")
+        scored.append(generate_decision_report(sid, with_explanations=False))
     shortlist = sorted(scored, key=lambda r: r["risk_score"], reverse=True)[:top_n]
+    if progress:
+        progress(f"Explaining the top {len(shortlist)}")
     ranked = [generate_decision_report(r["store_id"]) for r in shortlist]
     ranked.sort(key=lambda r: r["risk_score"], reverse=True)
 

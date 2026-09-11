@@ -34,6 +34,8 @@ import json
 import logging
 import re
 import sys
+import threading
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from typing import Generator, Literal, TypedDict
@@ -43,15 +45,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
 
-from config import LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE
+from config import LLM_API_KEY, LLM_MAX_TOKENS, LLM_MODEL, LLM_TEMPERATURE
 from src import database, decision_engine, guardrails, model_engine, prompts
 from src import query_understanding as qu
 from src import response_validation as rv
 from src import validation as dv
 
 logger = logging.getLogger(__name__)
+
+# Progress reporting. The UI shows what the agent is doing and how long it has
+# been doing it, because a silent spinner for several seconds reads as a hang.
+# Thread-local so a background worker reports only to its own listener.
+_progress = threading.local()
+
+
+@contextmanager
+def progress_reporting(callback):
+    """Route this thread's progress messages to `callback` for the duration."""
+    previous = getattr(_progress, "callback", None)
+    _progress.callback = callback
+    try:
+        yield
+    finally:
+        _progress.callback = previous
+
+
+def _emit(stage: str) -> None:
+    callback = getattr(_progress, "callback", None)
+    if callback is None:
+        return
+    try:
+        callback(stage)
+    except Exception:  # a broken listener must never break the answer
+        logger.debug("progress listener raised", exc_info=True)
 
 Intent = Literal["performance", "forecast", "recommend", "whatif", "out_of_scope"]
 
@@ -82,10 +109,6 @@ class AgentState(TypedDict, total=False):
     previous_metrics: list[str]
     previous_comparison: bool
     previous_date_range: list[str]
-
-
-class RouterOutput(BaseModel):
-    intent: Intent = Field(description="The single best-matching intent for the user's question.")
 
 
 # ── Backwards-compatible helpers ─────────────────────────────────────────────
@@ -184,31 +207,10 @@ def _get_llm():
     if _llm is None:
         if not LLM_API_KEY:
             raise RuntimeError("OPENROUTER_API_KEY is not set — add it to your .env file.")
-        _llm = ChatOpenRouter(model=LLM_MODEL, temperature=LLM_TEMPERATURE, api_key=LLM_API_KEY)
+        _llm = ChatOpenRouter(model=LLM_MODEL, temperature=LLM_TEMPERATURE,
+                              api_key=LLM_API_KEY, max_tokens=LLM_MAX_TOKENS)
     return _llm
 
-
-def _classify_intent_with_llm(query: str) -> Intent:
-    """Ask the model for one intent word and match it against the allowed set.
-
-    Deliberately a plain completion rather than with_structured_output():
-    structured output needs tool/function-calling support, which the free
-    OpenRouter models don't all have — on those, every routing call failed and
-    the agent silently ran on keywords alone.
-    """
-    reply = _get_llm().invoke([
-        SystemMessage(content=prompts.SYSTEM_PROMPT_ROUTER),
-        HumanMessage(content=query),
-    ])
-    raw = (reply.content or "").strip().lower()
-
-    for candidate in ("out_of_scope", "performance", "forecast", "recommend", "whatif"):
-        if candidate in raw:
-            return candidate  # type: ignore[return-value]
-    raise ValueError(f"model returned an unrecognised intent: {raw[:60]!r}")
-
-
-# ── Nodes ────────────────────────────────────────────────────────────────────
 
 def guardrail_node(state: AgentState) -> dict:
     """First node in the graph: screen the message before anything else runs.
@@ -216,6 +218,7 @@ def guardrail_node(state: AgentState) -> dict:
     Runs ahead of everything so a blocked message never reaches the LLM, the
     database, or the model — the refusal is produced entirely from code.
     """
+    _emit("Screening the request")
     verdict = guardrails.screen_input(state.get("query", ""))
     if verdict.blocked and verdict.safe_remainder:
         # Mixed message: the refused part is refused and said so, and the
@@ -236,6 +239,7 @@ def understand_node(state: AgentState) -> dict:
     """Raw text -> structure, with this session's earlier turns available."""
     # The answerable remainder when part of the message was refused, otherwise
     # the message itself.
+    _emit("Reading the question")
     query = state.get("safe_query") or state["query"]
     context = get_session_context(state.get("session_id", "default"))
     coverage = dv.get_coverage()
@@ -254,6 +258,7 @@ def understand_node(state: AgentState) -> dict:
 
 def validate_node(state: AgentState) -> dict:
     """Check the structured question against what the data can support."""
+    _emit("Checking what the data supports")
     understanding = state["understanding"]
     context = get_session_context(state.get("session_id", "default"))
     result = dv.validate(understanding, context)
@@ -467,7 +472,7 @@ def _run_recommend(step) -> dict:
         # methodology and the fleet data to run it on both already existed.
         requested = qu.parse_fleet_request(step.clause).get("n") or _FLEET_RISK_DEFAULT_N
         top_n = max(1, min(int(requested), _FLEET_RISK_MAX_N))
-        report = decision_engine.rank_fleet_risk(top_n=top_n)
+        report = decision_engine.rank_fleet_risk(top_n=top_n, progress=_emit)
         sources = sorted({s for r in report["ranked_stores"] for s in r["data_sources"]}
                          | {"database.get_fleet_trend_screen"})
         violations = decision_engine.check_report_consistency(report)
@@ -477,7 +482,7 @@ def _run_recommend(step) -> dict:
                 "decision_report": report, "consistency_violations": violations}
 
     if len(step.stores) > 1:
-        report = decision_engine.compare_stores_report(step.stores)
+        report = decision_engine.compare_stores_report(step.stores, progress=_emit)
         sources = sorted({s for r in report["ranked_stores"] for s in r["data_sources"]})
     elif len(step.stores) == 1:
         report = decision_engine.generate_decision_report(step.stores[0])
@@ -504,6 +509,18 @@ _HANDLERS = {
 }
 
 
+def _STEP_PROGRESS_LABEL(spec) -> str:
+    """What the user is told is happening while a plan step runs."""
+    where = ("Store " + ", ".join(map(str, spec.stores))) if spec.stores else "the fleet"
+    return {
+        "performance": f"Fetching sales history for {where}",
+        "forecast": f"Running the 7-day forecast for {where}",
+        "whatif": f"Simulating the promotion for {where}",
+        "recommend": (f"Scoring risk across the fleet" if not spec.stores
+                      else f"Scoring risk for {where}"),
+    }.get(spec.type, f"Working on {where}")
+
+
 def execute_node(state: AgentState) -> dict:
     """Run every step of the validated plan, in the order the user asked."""
     result = state["validation"]
@@ -517,6 +534,7 @@ def execute_node(state: AgentState) -> dict:
         handler = _HANDLERS.get(spec.type)
         if handler is None:
             continue
+        _emit(_STEP_PROGRESS_LABEL(spec))
         try:
             outcome = handler(spec)
         except Exception as exc:
@@ -1164,8 +1182,36 @@ def _llm_context(state: AgentState) -> dict:
     }
 
 
+# A single-section answer is asked to stay near 120 words; the rest is headroom.
+# A stacked question legitimately needs more, so the budget grows per section
+# rather than being one flat number that either truncates or invites rambling.
+_TOKENS_PER_EXTRA_SECTION = 250
+_MAX_COMPOSITION_TOKENS = 1400
+
+
+def _token_budget(step_count: int) -> int:
+    return min(LLM_MAX_TOKENS + max(0, step_count - 1) * _TOKENS_PER_EXTRA_SECTION,
+               _MAX_COMPOSITION_TOKENS)
+
+
+def _looks_truncated(text: str) -> bool:
+    """A reply that stopped mid-sentence because it hit the token ceiling.
+
+    Cheaper to detect than to prevent, and the grounded template is always
+    available — so a truncated answer is discarded rather than shown.
+    """
+    stripped = (text or "").rstrip()
+    return bool(stripped) and stripped[-1] not in ".!?:)]\"'*`%…"
+
+
 def _compose_with_llm(state: AgentState, context: dict) -> str:
+    _emit("Writing the answer")
     llm = _get_llm()
+    budget = _token_budget(len(state.get("steps") or []))
+    try:
+        llm = llm.bind(max_tokens=budget)
+    except Exception:  # pragma: no cover - provider without bind support
+        logger.debug("could not bind a per-question token budget", exc_info=True)
     system_prompt = _PROMPT_BY_INTENT.get(state.get("intent"), prompts.SYSTEM_PROMPT_DECISION)
     if len(state.get("steps") or []) > 1:
         system_prompt = f"{prompts.SYSTEM_PROMPT_MULTI_INTENT}\n\n{system_prompt}"
@@ -1233,6 +1279,8 @@ def respond_node(state: AgentState) -> dict:
     response = None
     try:
         candidate = _compose_with_llm(state, _llm_context(state))
+        if _looks_truncated(candidate):
+            raise ValueError("model reply was cut off at the token limit")
         report = _check(_assemble(candidate, notices, sources))
         if report.passed:
             response = candidate
