@@ -1,16 +1,3 @@
-"""
-pages/2_📈_Forecasting.py
-Owner: Ashutosh — ML Engineer / Dikshit — UI Developer
-
-7-Day Sales Forecasting page:
-- Recursive LightGBM forecast with confidence intervals
-- Store selector and feature highlights
-- SHAP feature importance driver bar chart & waterfall breakdown
-- What-If promo impact simulation
-- Multi-model agreement chart (LightGBM vs XGBoost vs Naive Baseline)
-- Automated natural language forecast narrative & CSV export
-"""
-
 import sys
 import time
 import sqlite3
@@ -19,91 +6,162 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from config import DB_PATH, USE_MOCKS
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import DB_PATH
 from src.model_engine import (
     get_7day_forecast, get_shap_explanations, get_missing_store_info,
     get_shap_waterfall_data, get_baseline_comparison, get_whatif_forecast,
     get_forecast_calendar,
 )
+from src.ui_theme import apply_theme, asset_data_uri
 
-st.set_page_config(
-    page_title="Sales Forecasting — Retail AI",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Forecasting", page_icon="📈", layout="wide")
+apply_theme()
 
-# ── Custom CSS (matches Dashboard dark theme) ─────────────────────────────────
-st.markdown(
-    """
+ASSISTANT_AVATAR = asset_data_uri("avatar.png") or "https://img.icons8.com/fluency/96/businessman.png"
+
+st.markdown("""
+<style>
+    p, li { font-size: 1.35rem; line-height: 1.75; }
+    .stMarkdown h1 { font-size: 2.9rem !important; }
+    .stMarkdown h2 { font-size: 2.4rem !important; }
+    .stMarkdown h3, .stMarkdown h4 { font-size: 2.0rem !important; }
+    [data-testid="stMetricValue"] { font-size: 2.7rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 1.3rem !important; }
+    [data-testid="stMetricDelta"] { font-size: 1.1rem !important; }
+
+    /* The centered store-ID input — "average" sized, emerald glow, dark to match the page */
+    div[data-testid="stTextInput"] input {
+        font-size: 1.3rem !important;
+        text-align: center;
+        border-radius: 999px !important;
+        border: 1.5px solid rgba(34,197,94,0.55) !important;
+        box-shadow: 0 0 0 1.5px rgba(34,197,94,0.35), 0 8px 24px rgba(34,197,94,0.18);
+        padding: 0.6rem 1.2rem !important;
+        background: rgba(6,20,13,0.85) !important;
+        color: #e5e7eb !important;
+    }
+    div[data-testid="stTextInput"] input::placeholder { color: rgba(229,231,235,0.5) !important; }
+
+    /* The "Ask →" submit button — emerald-to-blue gradient pill, matching the input above */
+    div[data-testid="stForm"] button {
+        background: linear-gradient(90deg, #10b981, #3b82f6) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 999px !important;
+        font-size: 1.1rem !important;
+        font-weight: 700 !important;
+        padding: 0.6rem 1.2rem !important;
+        box-shadow: 0 8px 24px rgba(16,185,129,0.25);
+    }
+    div[data-testid="stForm"] button:hover { filter: brightness(1.1); }
+    div[data-testid="stForm"] button p { color: white !important; }
+
+    @keyframes popIn3D {
+        0%   { opacity: 0; transform: scale3d(0.7,0.7,0.7) rotateY(-20deg) translateY(20px); }
+        100% { opacity: 1; transform: scale3d(1,1,1) rotateY(0deg) translateY(0); }
+    }
+    [data-testid="stPlotlyChart"] {
+        animation: popIn3D 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+        transform-style: preserve-3d;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+components.html("""
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+    body { margin: 0; background: transparent; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .row { display: flex; align-items: center; justify-content: center; gap: 18px; }
+    @keyframes float3d {
+        0%, 100% { transform: perspective(700px) rotateX(6deg) rotateY(-6deg) translateY(0px); }
+        50%      { transform: perspective(700px) rotateX(-6deg) rotateY(6deg) translateY(-8px); }
+    }
+    .title3d { animation: float3d 4s ease-in-out infinite; transform-style: preserve-3d; }
+</style>
+<body>
+    <div class="row">
+        <img src="https://img.icons8.com/fluency/96/line-chart.png"
+             class="title3d w-16 h-16 drop-shadow-lg" />
+        <h1 class="title3d text-6xl font-extrabold text-center
+                   bg-gradient-to-r from-emerald-400 via-teal-300 to-blue-400
+                   bg-clip-text text-transparent drop-shadow-lg">
+            Sales Forecasting Assistant
+        </h1>
+    </div>
+    <p class="text-gray-300 text-2xl text-center">
+        Get accurate sales predictions, discover trends, and make smarter decisions for your business growth.
+    </p>
+</body>
+""", height=170)
+
+
+def tailwind_block(inner_html: str, height: int):
+    components.html(f"""
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .stApp { background: linear-gradient(135deg, #0a0c14 0%, #0e1117 50%, #0a0f1e 100%); }
-    div[data-testid="metric-container"] {
-        background: linear-gradient(135deg, #1a1d27 0%, #1e2133 100%);
-        border: 1px solid #2E3250; border-radius: 16px; padding: 20px 24px;
-        box-shadow: 0 4px 24px rgba(108,99,255,0.08);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-2px); box-shadow: 0 8px 32px rgba(108,99,255,0.18);
-    }
-    div[data-testid="metric-container"] > label {
-        font-size: 0.78rem !important; font-weight: 600 !important;
-        letter-spacing: 0.06em; text-transform: uppercase; color: #8B8FA8 !important;
-    }
-    div[data-testid="metric-container"] [data-testid="stMetricValue"] {
-        font-size: 2rem !important; font-weight: 700 !important; color: #E0E0FF !important;
-    }
-    hr { border-color: #2E3250 !important; margin: 2rem 0 !important; }
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0e1117 0%, #141727 100%);
-        border-right: 1px solid #2E3250;
-    }
-    div[data-testid="stPlotlyChart"] > div {
-        border-radius: 12px; border: 1px solid #2E3250; overflow: hidden;
-    }
-    .page-title {
-        background: linear-gradient(90deg, #6C63FF, #43D9A4);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        font-size: 2.2rem; font-weight: 700; margin-bottom: 0.1rem;
-    }
-    .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
-             font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; }
-    .badge-live { background: rgba(67,217,164,0.15); color: #43D9A4; border: 1px solid #43D9A4; }
-    .badge-mock { background: rgba(255,165,82,0.15); color: #FFA552; border: 1px solid #FFA552; }
-    .hero-card {
-        background: linear-gradient(135deg, #1a1d27 0%, #1e2133 100%);
-        border: 1px solid #2E3250; border-radius: 16px; padding: 24px;
-        margin-bottom: 1.5rem;
-    }
-    .feature-card {
-        background: linear-gradient(135deg, #141727 0%, #1a1d2e 100%);
-        border: 1px solid #2E3250; border-radius: 14px; padding: 18px 20px;
-        margin-bottom: 12px; display: flex; align-items: center; gap: 16px;
-    }
+        body {{ margin:0; background: transparent; font-family: -apple-system, sans-serif; }}
+        @keyframes popIn3D {{
+            0%   {{ opacity: 0; transform: scale3d(0.7,0.7,0.7) rotateY(-20deg) translateY(20px); }}
+            100% {{ opacity: 1; transform: scale3d(1,1,1) rotateY(0deg) translateY(0); }}
+        }}
+        .pop3d {{ animation: popIn3D 0.6s cubic-bezier(0.2,0.8,0.2,1); transform-style: preserve-3d; }}
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+    <body class="text-white">{inner_html}</body>
+    """, height=height, scrolling=False)
 
-# ── Header ────────────────────────────────────────────────────────────────────
-mode_badge = '<span class="badge badge-mock">MOCK MODE</span>' if USE_MOCKS else '<span class="badge badge-live">LIVE DB</span>'
-st.markdown(
-    f'<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 0.5rem;">'
-    f'<span class="page-title">📈 7-Day Sales Forecasting</span>{mode_badge}</div>',
-    unsafe_allow_html=True,
-)
-st.caption("Generate multi-step LightGBM forecasts with confidence intervals, scenario simulation, and model explanations.")
-st.divider()
 
-# ── Feature Dictionary ────────────────────────────────────────────────────────
+def greeting_card():
+    tailwind_block(f"""
+    <div class="pop3d flex items-center gap-5 bg-gradient-to-br from-emerald-950 via-black to-emerald-900
+                rounded-3xl p-6 shadow-2xl border border-emerald-500/30">
+        <img src="{ASSISTANT_AVATAR}" class="w-24 h-24 rounded-full ring-4 ring-emerald-400/60 shadow-lg" />
+        <div>
+            <p class="text-3xl font-bold text-emerald-300">👋 Hi, how can I help you?</p>
+            <p class="text-xl text-gray-300 mt-1">Which store's sales trend would you like to see?</p>
+        </div>
+    </div>
+    """, height=170)
+
+
+def section_heading(title: str, color: str = "emerald"):
+    """A section title with a colored accent bar instead of a generic emoji
+    prefix — keeps headings looking designed rather than chatbot-generated."""
+    tailwind_block(f"""
+    <div class="flex items-center gap-3 mt-1">
+        <div class="w-2 h-10 rounded-full bg-{color}-400"></div>
+        <p class="text-4xl font-extrabold text-white tracking-tight">{title}</p>
+    </div>
+    """, height=72)
+
+
+def feature_highlights():
+    cards = [
+        ("📈", "emerald", "Better Forecasts", "Plan inventory &amp; reduce stockouts"),
+        ("🎯", "blue", "Spot Trends", "Understand what's driving sales"),
+        ("💡", "purple", "Make Smarter Decisions", "Grow your business with data"),
+    ]
+    rows = "".join(f"""
+    <div class="pop3d flex items-center gap-5 bg-gradient-to-br from-{color}-950/60 via-black to-black
+                rounded-2xl p-6 shadow-xl border border-{color}-500/30">
+        <div class="w-16 h-16 shrink-0 rounded-xl bg-{color}-500/20 flex items-center justify-center text-4xl">
+            {icon}
+        </div>
+        <div>
+            <p class="text-2xl font-bold text-{color}-300">{title}</p>
+            <p class="text-lg text-gray-400 mt-1">{desc}</p>
+        </div>
+    </div>
+    """ for icon, color, title, desc in cards)
+
+    tailwind_block(f"""
+    <div class="h-full flex flex-col justify-between gap-6">{rows}</div>
+    """, height=520)
+
+
 FEATURE_PHRASES = {
     "Promo": "today's promotion", "Sales_roll_mean_7": "this store's average sales over the last 7 days",
     "Sales_roll_mean_14": "this store's average sales over the last 14 days",
@@ -127,7 +185,6 @@ FEATURE_PHRASES = {
     "Promo2": "the recurring quarterly promotion program",
 }
 
-
 def top_driver_phrase(shap_dict: dict) -> str:
     if not shap_dict:
         return "its usual seasonal pattern"
@@ -137,12 +194,20 @@ def top_driver_phrase(shap_dict: dict) -> str:
 
 def store_baseline(store_id: int) -> float:
     conn = sqlite3.connect(DB_PATH)
+    # Open = 1 only — otherwise closed days (Sales = 0) drag the "normal day" average down.
     row = conn.execute("SELECT AVG(Sales) FROM sales WHERE Store = ? AND Open = 1", (store_id,)).fetchone()
     conn.close()
     return float(row[0]) if row and row[0] else 0.0
 
 
 def _day_reason(date, pct: float, calendar, next_trading_date, driver_phrase) -> str:
+    """A grounded reason for why one specific day differs from the norm —
+    checked in the correct direction against the one calendar fact we can
+    actually verify (Promo), before falling back to the model's SHAP driver
+    (only for the exact day that driver was computed for, never reused for
+    a different day it wasn't calculated on). No day-of-week guesswork —
+    whether weekends run higher or lower is store-specific, not universal,
+    so asserting it risks giving a backwards reason."""
     promo_today = False
     if calendar is not None and not calendar.empty:
         cal_row = calendar[calendar["Date"] == date]
@@ -225,6 +290,7 @@ def build_narrative(store_id: int, forecast, calendar=None) -> str:
 
 
 def render_kpi_row(store_id: int, forecast, calendar):
+    """The at-a-glance numbers before anyone reads a single chart."""
     open_days = forecast[forecast["PredictedSales"] > 0]
     week_total = int(open_days["PredictedSales"].sum())
     avg_daily = week_total / len(open_days) if len(open_days) else 0
@@ -241,32 +307,38 @@ def render_kpi_row(store_id: int, forecast, calendar):
 
 
 def build_shap_driver_chart(shap_dict: dict):
+    """Horizontal bar of the top 5 features moving tomorrow's prediction —
+    green pushes sales up, red pushes them down."""
     if not shap_dict:
         return None
-    items = list(shap_dict.items())[::-1]
+    items = list(shap_dict.items())[::-1]  # reverse so the strongest driver sits on top
     labels = [FEATURE_PHRASES.get(name, name).capitalize() for name, _ in items]
     values = [info["value"] for _, info in items]
-    colors = ["#43D9A4" if v > 0 else "#FF6584" for v in values]
+    colors = ["#10b981" if v > 0 else "#ef4444" for v in values]
 
     fig = go.Figure(go.Bar(
         x=values, y=labels, orientation="h", marker_color=colors,
         text=[f"{'+' if v > 0 else ''}{v:.2f}" for v in values], textposition="outside",
     ))
     fig.update_layout(
-        title=dict(text="Top Drivers — Tomorrow's Prediction", font=dict(size=18, color="#E0E0FF")),
-        xaxis_title="Impact (SHAP value)", font=dict(size=13, color="#8B8FA8"),
-        template="plotly_dark", height=340, margin=dict(t=40, l=10),
+        title=dict(text="Top Drivers — Tomorrow's Prediction", font=dict(size=20)),
+        xaxis_title="Impact (SHAP, relative)", font=dict(size=15, color="#e5e7eb"),
+        template="plotly_dark", height=340, margin=dict(t=50, l=10),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
     )
     return fig
 
 
 def build_shap_waterfall_chart(waterfall_data: dict, top_n: int = 6):
+    """Walks from this store's 'typical day' to tomorrow's actual prediction,
+    one driver at a time, in real € — not raw SHAP log-units. Each step's €
+    amount is the true marginal effect of adding that feature on top of the
+    ones before it, so the bars always add up exactly to the final number."""
     if not waterfall_data:
         return None
     base_sales = waterfall_data["base_value_sales"]
     pred_sales = waterfall_data["predicted_sales"]
-    features = waterfall_data["features"]
+    features = waterfall_data["features"]  # already sorted by |shap_value| descending
 
     running_log = np.log1p(base_sales)
     running_dollar = base_sales
@@ -291,21 +363,23 @@ def build_shap_waterfall_chart(waterfall_data: dict, top_n: int = 6):
         y=[base_sales] + deltas + [pred_sales],
         text=[f"€{base_sales:,.0f}"] + [f"{'+' if d >= 0 else ''}€{d:,.0f}" for d in deltas] + [f"€{pred_sales:,.0f}"],
         textposition="outside",
-        connector=dict(line=dict(color="#2E3250")),
-        increasing=dict(marker=dict(color="#43D9A4")),
-        decreasing=dict(marker=dict(color="#FF6584")),
-        totals=dict(marker=dict(color="#6C63FF")),
+        connector=dict(line=dict(color="rgba(255,255,255,0.3)")),
+        increasing=dict(marker=dict(color="#10b981")),
+        decreasing=dict(marker=dict(color="#ef4444")),
+        totals=dict(marker=dict(color="#3b82f6")),
     ))
     fig.update_layout(
-        title=dict(text=f"How We Got Tomorrow's Number ({waterfall_data['date']})", font=dict(size=18, color="#E0E0FF")),
-        yaxis_title="Sales (€)", font=dict(size=13, color="#8B8FA8"),
-        template="plotly_dark", height=400, margin=dict(t=40),
+        title=dict(text=f"How We Got Tomorrow's Number ({waterfall_data['date']})", font=dict(size=20)),
+        yaxis_title="Sales (€)", font=dict(size=15, color="#e5e7eb"),
+        template="plotly_dark", height=400, margin=dict(t=50),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False,
     )
     return fig
 
 
 def build_promo_whatif_chart(store_id: int):
+    """Same week, replayed twice — once as if Promo were off every day, once
+    as if it were on — so the promo's real day-by-day lift is visible."""
     promo_on = get_whatif_forecast(store_id, True)
     promo_off = get_whatif_forecast(store_id, False)
     if promo_on.empty or promo_off.empty:
@@ -313,94 +387,67 @@ def build_promo_whatif_chart(store_id: int):
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=promo_off["Date"], y=promo_off["PredictedSales"], name="Without Promo", marker_color="#6b7280"))
-    fig.add_trace(go.Bar(x=promo_on["Date"], y=promo_on["PredictedSales"], name="With Promo", marker_color="#43D9A4"))
+    fig.add_trace(go.Bar(x=promo_on["Date"], y=promo_on["PredictedSales"], name="With Promo", marker_color="#10b981"))
     fig.update_layout(
-        title=dict(text="What-If Scenario: Promo On vs Off", font=dict(size=18, color="#E0E0FF")),
+        title=dict(text="What If: Promo On vs Off", font=dict(size=20)),
         barmode="group", xaxis_title="Date", yaxis_title="Sales (€)",
-        font=dict(size=13, color="#8B8FA8"), legend=dict(font=dict(size=12)),
-        template="plotly_dark", height=380, margin=dict(t=40),
+        font=dict(size=15, color="#e5e7eb"), legend=dict(font=dict(size=14)),
+        template="plotly_dark", height=380, margin=dict(t=50),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
 
 def build_model_comparison_chart(store_id: int):
+    """LightGBM vs XGBoost vs a naive 7-day moving average — when the two
+    real models agree closely, that's a trustworthy forecast; when they
+    diverge, that's a week worth double-checking."""
     comp = get_baseline_comparison(store_id)
     if comp.empty:
         return None
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=comp["Date"], y=comp["Baseline_MovingAvg"], mode="lines+markers",
-                              name="Naive Baseline (7-day avg)", line=dict(color="#8B8FA8", width=2, dash="dot")))
+                              name="Naive Baseline (7-day avg)", line=dict(color="#6b7280", width=2, dash="dot")))
     fig.add_trace(go.Scatter(x=comp["Date"], y=comp["XGBoost"], mode="lines+markers",
-                              name="XGBoost", line=dict(color="#FFA552", width=2)))
+                              name="XGBoost", line=dict(color="#3b82f6", width=2)))
     fig.add_trace(go.Scatter(x=comp["Date"], y=comp["LightGBM"], mode="lines+markers",
-                              name="LightGBM (primary)", line=dict(color="#6C63FF", width=3)))
+                              name="LightGBM (primary)", line=dict(color="#10b981", width=3)))
     fig.update_layout(
-        title=dict(text="Model Agreement — Is This Forecast Trustworthy?", font=dict(size=18, color="#E0E0FF")),
-        xaxis_title="Date", yaxis_title="Sales (€)", font=dict(size=13, color="#8B8FA8"),
-        legend=dict(font=dict(size=12)),
-        hovermode="x unified", template="plotly_dark", height=380, margin=dict(t=40),
+        title=dict(text="Model Agreement — Is This Forecast Trustworthy?", font=dict(size=20)),
+        xaxis_title="Date", yaxis_title="Sales (€)", font=dict(size=15, color="#e5e7eb"),
+        legend=dict(font=dict(size=14)),
+        hovermode="x unified", template="plotly_dark", height=380, margin=dict(t=50),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
 
-# ── State Machine ─────────────────────────────────────────────────────────────
+# ── State machine ─────────────────────────────────────────────────────────────
 if "stage" not in st.session_state:
     st.session_state.stage = "greeting"
     st.session_state.store_id = None
 
 if st.session_state.stage == "greeting":
-    left, right = st.columns([1.6, 1], gap="large")
+    left, right = st.columns([2, 1], gap="large")
     with left:
-        st.markdown(
-            """
-            <div class="hero-card">
-                <h3 style="color: #6C63FF; margin-top:0; font-size: 1.5rem;">👋 Sales Forecasting Assistant</h3>
-                <p style="color: #A0A5C0; font-size: 1.05rem; margin-bottom: 1.2rem;">
-                    Select a Store ID below to generate a 7-day recursive LightGBM sales forecast with confidence ranges, driver explanations, and promo scenario simulations.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        with st.form("store_form", clear_on_submit=False):
-            store_id_val = st.number_input("Select Store ID (1–1115)", min_value=1, max_value=1115, value=1, step=1)
-            submitted = st.form_submit_button("🚀 Generate 7-Day Forecast", use_container_width=True)
-
+        greeting_card()
+        with st.form("store_form", clear_on_submit=True):
+            store_input = st.text_input("", placeholder="Enter a Store ID (1–1115)…", label_visibility="collapsed")
+            submitted = st.form_submit_button("Ask →", use_container_width=True)
     with right:
-        st.markdown(
-            """
-            <div class="feature-card">
-                <span style="font-size: 2rem;">📈</span>
-                <div>
-                    <strong style="color: #E0E0FF; font-size: 1rem;">Multi-Step Recursive Engine</strong>
-                    <div style="color: #8B8FA8; font-size: 0.85rem;">LightGBM & XGBoost with lag-feature updating</div>
-                </div>
-            </div>
-            <div class="feature-card">
-                <span style="font-size: 2rem;">🔬</span>
-                <div>
-                    <strong style="color: #E0E0FF; font-size: 1rem;">SHAP Driver Analysis</strong>
-                    <div style="color: #8B8FA8; font-size: 0.85rem;">Deconstruct day-to-day drivers in € & log-units</div>
-                </div>
-            </div>
-            <div class="feature-card">
-                <span style="font-size: 2rem;">⚡</span>
-                <div>
-                    <strong style="color: #E0E0FF; font-size: 1rem;">What-If Scenario Simulation</strong>
-                    <div style="color: #8B8FA8; font-size: 0.85rem;">Simulate sales with promo forced ON vs OFF</div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        feature_highlights()
 
     if submitted:
-        st.session_state.store_id = int(store_id_val)
-        st.session_state.stage = "revealing"
-        st.rerun()
+        try:
+            sid = int(store_input.strip())
+            if not (1 <= sid <= 1115):
+                raise ValueError
+            st.session_state.store_id = sid
+            st.session_state.stage = "revealing"
+            st.rerun()
+        except (ValueError, AttributeError):
+            st.error("Please enter a valid Store ID between 1 and 1115.")
 
 elif st.session_state.stage == "revealing":
     store_id = st.session_state.store_id
@@ -420,29 +467,29 @@ elif st.session_state.stage == "revealing":
     fig.add_trace(go.Scatter(x=forecast["Date"], y=forecast["UpperBound"],
                               line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=forecast["Date"], y=forecast["LowerBound"],
-                              fill="tonexty", fillcolor="rgba(67,217,164,0.12)",
+                              fill="tonexty", fillcolor="rgba(16,185,129,0.15)",
                               line=dict(width=0), name="Confidence range", hoverinfo="skip"))
     fig.add_trace(go.Scatter(
         x=forecast["Date"], y=forecast["PredictedSales"],
         mode="lines+markers", name="Predicted Sales",
-        line=dict(color="#43D9A4", width=3),
+        line=dict(color="rgb(16,185,129)", width=3),
         marker=dict(
             size=9,
-            color=["#6b7280" if c else "#43D9A4" for c in is_closed],
+            color=["#6b7280" if c else "rgb(16,185,129)" for c in is_closed],
             symbol=["x" if c else "circle" for c in is_closed],
         ),
         text=point_labels, hovertemplate="%{text}<extra></extra>",
     ))
-    fig.update_layout(title=dict(text=f"Store {store_id} — 7-Day Sales Forecast", font=dict(size=20, color="#E0E0FF")),
-                       xaxis_title="Date", yaxis_title="Sales (€)", font=dict(size=14, color="#8B8FA8"),
-                       legend=dict(font=dict(size=12)),
+    fig.update_layout(title=dict(text=f"Store {store_id} — 7-Day Forecast", font=dict(size=22)),
+                       xaxis_title="Date", yaxis_title="Sales (€)", font=dict(size=16, color="#e5e7eb"),
+                       legend=dict(font=dict(size=14)),
                        hovermode="x unified", template="plotly_dark", height=400,
-                       margin=dict(t=40), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                       margin=dict(t=50), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True, key=f"chart_{store_id}")
     if is_closed.any():
         st.caption("✕ marks days the store is closed — €0 is expected, not a prediction gap.")
 
-    time.sleep(1.5)
+    time.sleep(4)
     st.session_state.stage = "explaining"
     st.rerun()
 
@@ -464,18 +511,22 @@ elif st.session_state.stage == "no_data":
             text=[d.strftime("%A, %b %d") for d in flat["Date"]],
             hovertemplate="No forecast — %{text}<extra></extra>",
         ))
-        fig.update_layout(title=dict(text=f"Store {store_id} — No Forecast Available", font=dict(size=20, color="#E0E0FF")),
-                           xaxis_title="Date", font=dict(size=14, color="#8B8FA8"),
+        fig.update_layout(title=dict(text=f"Store {store_id} — No Forecast Available", font=dict(size=22)),
+                           xaxis_title="Date", font=dict(size=16, color="#e5e7eb"),
                            yaxis_title="Sales (€)", yaxis=dict(range=[-1, 10]), template="plotly_dark",
-                           height=400, margin=dict(t=40), paper_bgcolor="rgba(0,0,0,0)",
+                           height=400, margin=dict(t=50), paper_bgcolor="rgba(0,0,0,0)",
                            plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
         st.plotly_chart(fig, use_container_width=True, key=f"chart_nodata_{store_id}")
 
-        st.warning(
+        st.markdown(
             f"The line shows **€0 because we have nothing to predict from** — not because Store "
             f"{store_id} is expected to sell nothing. Its own recent trading days average around "
-            f"**€{info['recent_avg']:,.0f}**, a normal active store. The source dataset `test.csv` "
-            f"did not include a calendar window for Store {store_id}."
+            f"<b>€{info['recent_avg']:,.0f}</b>, a perfectly normal, active store.<br><br>"
+            f"<b>The actual reason:</b> the original forecasting dataset (<code>test.csv</code>) only defines "
+            f"next week's Open/Promo/Holiday calendar for 856 of the 1,115 stores — Store {store_id} wasn't "
+            f"one of them. Without that future calendar, the model has nothing to build a prediction from. "
+            f"It's a gap in the source data, not a signal about this store's business.",
+            unsafe_allow_html=True,
         )
 
     if st.button("← Try another store"):
@@ -489,9 +540,9 @@ elif st.session_state.stage == "explaining":
     narrative = build_narrative(store_id, forecast, calendar)
 
     render_kpi_row(store_id, forecast, calendar)
-    st.divider()
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-    st.markdown("### 🔬 Why This Forecast")
+    section_heading("Why This Forecast", "emerald")
     shap_dict = get_shap_explanations(store_id)
     waterfall_data = get_shap_waterfall_data(store_id)
     col1, col2 = st.columns(2)
@@ -508,47 +559,37 @@ elif st.session_state.stage == "explaining":
         else:
             st.info("No waterfall breakdown available for this store.")
 
-    st.divider()
-    st.markdown("### ⚡ What-If: Promotion Impact")
+    section_heading("What If: Promotion Impact", "blue")
     fig = build_promo_whatif_chart(store_id)
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True, key=f"promo_{store_id}")
 
-    st.divider()
-    st.markdown("### 🤖 Model Agreement & Reliability")
+    section_heading("Model Agreement", "purple")
     fig = build_model_comparison_chart(store_id)
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True, key=f"modelcmp_{store_id}")
 
-    st.divider()
-    st.markdown(
-        f"""
-        <div class="hero-card">
-            <h4 style="color: #43D9A4; margin-top:0; font-size: 1.3rem;">📋 Executive Summary — Store {store_id}</h4>
-            <div style="color: #E0E0FF; font-size: 1.05rem; line-height: 1.7;">{narrative}</div>
+    tailwind_block(f"""
+    <div class="pop3d bg-gradient-to-br from-emerald-950/70 via-black to-emerald-900/40
+                border border-emerald-500/30 rounded-3xl p-7 shadow-2xl">
+        <div class="flex items-center gap-3 mb-3">
+            <div class="w-1.5 h-7 rounded-full bg-emerald-400"></div>
+            <p class="text-emerald-300 font-extrabold text-3xl">What to Expect — Store {store_id}</p>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <p class="text-gray-100 text-xl leading-relaxed">{narrative}</p>
+    </div>
+    """, height=280)
 
-    # ── CSV Export ─────────────────────────────────────────────────────────────
-    csv_bytes = forecast.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="⬇️ Export 7-Day Forecast as CSV",
-        data=csv_bytes,
-        file_name=f"store_{store_id}_7day_forecast.csv",
-        mime="text/csv",
-    )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    c1, c2, _ = st.columns([1, 1, 2])
+    st.markdown("<div style='text-align:center; margin-top:1.5rem; font-size:1.5rem;'>Would you like to explore more stores?</div>",
+                unsafe_allow_html=True)
+    _, c1, c2, _ = st.columns([2, 1, 1, 2])
     with c1:
-        if st.button("🔄 Explore Another Store", use_container_width=True):
+        if st.button("Yes, explore another", use_container_width=True):
             st.session_state.stage = "greeting"
             st.session_state.store_id = None
             st.rerun()
     with c2:
-        if st.button("✅ Finish Exploration", use_container_width=True):
+        if st.button("No, I'm done", use_container_width=True):
             st.session_state.stage = "done"
             st.rerun()
 
@@ -557,18 +598,14 @@ elif st.session_state.stage == "done":
     forecast = get_7day_forecast(store_id)
     calendar = get_forecast_calendar(store_id)
     narrative = build_narrative(store_id, forecast, calendar)
-
-    st.markdown(
-        f"""
-        <div class="hero-card">
-            <h4 style="color: #43D9A4; margin-top:0; font-size: 1.3rem;">📋 Executive Summary — Store {store_id}</h4>
-            <div style="color: #E0E0FF; font-size: 1.05rem; line-height: 1.7;">{narrative}</div>
+    tailwind_block(f"""
+    <div class="pop3d bg-gradient-to-br from-emerald-950/70 via-black to-emerald-900/40
+                border border-emerald-500/30 rounded-3xl p-7 shadow-2xl">
+        <div class="flex items-center gap-3 mb-3">
+            <div class="w-1.5 h-7 rounded-full bg-emerald-400"></div>
+            <p class="text-emerald-300 font-extrabold text-3xl">What to Expect — Store {store_id}</p>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.success("Analysis complete! Click below if you wish to analyze another store.")
-    if st.button("← Start New Forecast"):
-        st.session_state.stage = "greeting"
-        st.session_state.store_id = None
-        st.rerun()
+        <p class="text-gray-100 text-xl leading-relaxed">{narrative}</p>
+    </div>
+    """, height=280)
+    st.caption("Thanks for exploring! Refresh the page to start over.")
