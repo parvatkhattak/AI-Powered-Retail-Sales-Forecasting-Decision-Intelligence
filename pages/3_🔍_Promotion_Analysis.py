@@ -18,9 +18,11 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
+import importlib
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.ui_theme import apply_theme
 from src import database
+importlib.reload(database)
 
 st.set_page_config(page_title="Promotion Analysis", page_icon="🔍", layout="wide")
 apply_theme()
