@@ -17,10 +17,13 @@ Architecture constraints:
   - All errors wrapped in try/except — never crashes Streamlit
 """
 
+import logging
 import sys
 from pathlib import Path
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -95,6 +98,8 @@ if "messages" not in st.session_state:
     st.session_state["messages"] = []
 if "pending_query" not in st.session_state:
     st.session_state["pending_query"] = ""
+if "awaiting_answer" not in st.session_state:
+    st.session_state["awaiting_answer"] = ""
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -129,6 +134,7 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat History", use_container_width=True, key="clear_chat"):
         st.session_state["messages"] = []
         st.session_state["pending_query"] = ""
+        st.session_state["awaiting_answer"] = ""
         st.rerun()
 
     st.caption("📦 Dataset: Rossmann Store Sales")
@@ -182,19 +188,29 @@ for msg in st.session_state["messages"]:
             citation_card(msg["sources"])
 
 # ── Chat Input ────────────────────────────────────────────────────────────────
-# Handle pending query from chip click first
-prompt = st.session_state.pop("pending_query", "") or st.chat_input(
+# st.chat_input is rendered unconditionally. It used to sit on the right-hand
+# side of an `or`, so clicking an example chip short-circuited it away and the
+# input box vanished from the page for that run.
+typed_query = st.chat_input(
     "Ask anything about your stores… e.g. 'Which store should I focus on next week?'",
     key="chat_input",
 )
+prompt = st.session_state.pop("pending_query", "") or typed_query
 
 if prompt:
-    # Add user message to history
+    # The user's message is committed to history and the script re-runs before
+    # the (slow) agent call starts. Previously both messages were appended only
+    # after the call returned, so submitting a second question mid-answer — or
+    # any failure during it — discarded the exchange and the visible text
+    # disappeared.
     st.session_state["messages"].append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
+    st.session_state["awaiting_answer"] = prompt
+    st.rerun()
 
-    # Stream assistant response
+# ── Generate the pending answer ───────────────────────────────────────────────
+if st.session_state.get("awaiting_answer"):
+    question = st.session_state.pop("awaiting_answer")
+
     with st.chat_message("assistant", avatar="🤖"):
         response_placeholder = st.empty()
         full_response = ""
@@ -202,43 +218,46 @@ if prompt:
 
         try:
             with st.spinner("Analysing your stores…"):
-                for chunk in run_agent_stream(prompt, session_id="streamlit_session"):
+                for chunk in run_agent_stream(question, session_id="streamlit_session"):
                     full_response += chunk
                     response_placeholder.markdown(full_response + "▌")
 
             response_placeholder.markdown(full_response)
 
-            # Parse out any [Sources] block that the agent appended
-            if "[Sources]" in full_response or "Sources:" in full_response:
-                marker = "[Sources]" if "[Sources]" in full_response else "Sources:"
-                parts = full_response.split(marker)
-                if len(parts) > 1:
-                    raw_sources = parts[-1].strip().split("\n")
-                    sources = [s.strip("- •*").strip() for s in raw_sources if s.strip()]
-
-            # Fallback citation when no sources parsed but response is real
-            if not sources and not USE_MOCKS:
+            # Citations are only ever what the agent actually reported. There
+            # used to be a fallback that invented two source names when none
+            # were parsed, which attributed data to functions that may never
+            # have run.
+            if "Sources:" in full_response:
+                tail = full_response.split("Sources:")[-1]
                 sources = [
-                    "database.get_store_metrics",
-                    "database.get_promo_history",
+                    line.strip("- •*").strip()
+                    for line in tail.strip().splitlines()
+                    if line.strip("- •*").strip()
                 ]
 
             if sources:
                 citation_card(sources)
 
-        except Exception as exc:
+        except Exception:
+            # The detail goes to the server log, not to the user: exception
+            # text can carry SQL, file paths and schema details.
+            logger.exception("AI Assistant failed to answer: %r", question)
             full_response = (
-                "⚠️ The AI assistant encountered an error. Please try again.\n\n"
-                f"_(Technical detail: {exc})_"
+                "⚠️ I couldn't process that request. Please try asking about store "
+                "sales, forecasts, promotions, or which stores need attention."
             )
             response_placeholder.markdown(full_response)
 
-    # Save to history
-    st.session_state["messages"].append({
-        "role": "assistant",
-        "content": full_response,
-        "sources": sources,
-    })
+        finally:
+            # finally, not the try body: Streamlit raises a BaseException to
+            # stop the script when the user submits again mid-answer, so this
+            # is what guarantees the exchange is still saved.
+            st.session_state["messages"].append({
+                "role": "assistant",
+                "content": full_response or "⚠️ That answer didn't finish. Please ask again.",
+                "sources": sources,
+            })
 
 # ── Empty state when no messages yet ─────────────────────────────────────────
 if not st.session_state["messages"]:

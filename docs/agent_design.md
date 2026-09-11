@@ -162,6 +162,50 @@ Two details worth knowing:
   `test_in_scope_fleet_question_still_reaches_the_data_layer` guards the
   opposite failure — a legitimate fleet-wide question being refused.
 
+## 5c. Guardrails enforced in code (`src/guardrails.py`)
+
+A system prompt is a request, not a control — a model can be talked out of one.
+So anything that actually matters is decided in code, in `guardrail_node`, the
+**first node in the graph**. A blocked message never reaches the router, the
+database, or the model:
+
+```
+START -> guardrail --blocked--> END        (refusal produced entirely in code)
+             |
+          allowed
+             v
+          router -> ... -> respond -> END
+```
+
+Screened categories, each with its own refusal so the user learns what was
+actually refused: `prompt_injection`, `system_prompt`, `secrets`,
+`destructive_db`, `raw_sql`, `internals`, `bulk_export`, plus empty and
+over-length input. Patterns are word-boundary anchored so ordinary retail
+phrasing survives — "sales **dropped** last month" is not `DROP TABLE`,
+"**update** me on Store 100" is not a SQL `UPDATE`, and
+`tests/test_guardrails.py` asserts both directions (30 adversarial prompts
+blocked, 10 legitimate ones allowed).
+
+On the way out, `redact_output()` strips anything credential-shaped from the
+response, since the LLM's wording is not fully predictable.
+
+### Why the architecture matters more than the patterns
+
+Regex screening is the outer layer, not the real control. The reason
+"run DROP TABLE" cannot work here is structural:
+
+| Control | Status |
+|---|---|
+| Does the LLM get tools / function-calling? | **No** — `bind_tools` is never called |
+| Can the LLM emit SQL that gets executed? | **No** — it only ever receives an already-computed dict to phrase |
+| Is there any path executing caller-supplied SQL? | **No** — every query is a fixed literal in `database.py` with bound parameters |
+| Database access mode | Read-only query functions; no INSERT/UPDATE/DELETE exists anywhere in the codebase |
+
+So even if the screening were bypassed entirely, there is nothing for a
+destructive instruction to reach. The screening exists so those attempts are
+refused clearly and logged, rather than being answered with something
+unhelpful.
+
 ## 6. Graceful degradation (no API key, no database yet)
 
 Two failure modes are handled explicitly, both covered by tests:

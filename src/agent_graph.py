@@ -34,7 +34,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from config import LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE
-from src import database, decision_engine, model_engine, prompts
+from src import database, decision_engine, guardrails, model_engine, prompts
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,8 @@ class AgentState(TypedDict, total=False):
     decision_report: dict         # Structured output from decision_engine
     response: str                 # Final formatted response for the user
     data_sources: list[str]       # Citation list for UI citation cards
-    error: str | None             # Error message if something fails
+    error: str | None             # Internal detail for logs — never shown to the user
+    blocked_reason: str | None    # Guardrail category when a message was refused
 
 
 class RouterOutput(BaseModel):
@@ -173,18 +174,48 @@ def _get_llm():
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 
+def _classify_intent_with_llm(query: str) -> Intent:
+    """Ask the model for one intent word and match it against the allowed set.
+
+    Deliberately a plain completion rather than with_structured_output():
+    structured output needs tool/function-calling support, which the free
+    OpenRouter models don't all have — on those, every routing call failed and
+    the agent silently ran on keywords alone. A one-word answer works on any
+    model, and an unrecognised answer is treated as a failure rather than
+    being passed downstream.
+    """
+    reply = _get_llm().invoke([
+        SystemMessage(content=prompts.SYSTEM_PROMPT_ROUTER),
+        HumanMessage(content=query),
+    ])
+    raw = (reply.content or "").strip().lower()
+
+    for candidate in ("out_of_scope", "performance", "forecast", "recommend", "whatif"):
+        if candidate in raw:
+            return candidate  # type: ignore[return-value]
+    raise ValueError(f"model returned an unrecognised intent: {raw[:60]!r}")
+
+
+def guardrail_node(state: AgentState) -> dict:
+    """First node in the graph: screen the message before anything else runs.
+
+    Runs ahead of the router so a blocked message never reaches the LLM, the
+    database, or the model — the refusal is produced entirely from code.
+    """
+    verdict = guardrails.screen_input(state.get("query", ""))
+    if verdict.blocked:
+        logger.info("guardrail blocked a message (category=%s)", verdict.category)
+        return {"blocked_reason": verdict.category, "response": verdict.reply, "data_sources": []}
+    return {"blocked_reason": None}
+
+
 def router_node(state: AgentState) -> dict:
     query = state["query"]
     store_ids = _extract_store_ids(query)
     error = None
 
     try:
-        structured_llm = _get_llm().with_structured_output(RouterOutput)
-        decision = structured_llm.invoke([
-            SystemMessage(content=prompts.SYSTEM_PROMPT_ROUTER),
-            HumanMessage(content=query),
-        ])
-        intent = decision.intent
+        intent = _classify_intent_with_llm(query)
     except Exception as exc:
         # Logged, not swallowed: a silently-failing LLM previously looked
         # identical to a working one, because the deterministic fallback
@@ -380,7 +411,9 @@ def respond_node(state: AgentState) -> dict:
         sources_block = "\n".join(f"- {s}" for s in sources)
         response += f"\n\n📚 Sources:\n{sources_block}"
 
-    return {"response": response, "error": error}
+    # Last line of defence before the text leaves the agent: the LLM's wording
+    # isn't fully predictable, so anything credential-shaped is stripped.
+    return {"response": guardrails.redact_output(response), "error": error}
 
 
 def _route_from_intent(state: AgentState) -> str:
@@ -399,8 +432,13 @@ def _route_from_intent(state: AgentState) -> str:
 
 # ── Graph assembly ───────────────────────────────────────────────────────────
 
+def _route_after_guardrail(state: AgentState) -> str:
+    return "blocked" if state.get("blocked_reason") else "router"
+
+
 def build_graph():
     graph = StateGraph(AgentState)
+    graph.add_node("guardrail", guardrail_node)
     graph.add_node("router", router_node)
     graph.add_node("data_analyst", data_analyst_node)
     graph.add_node("forecast", forecast_node)
@@ -408,7 +446,14 @@ def build_graph():
     graph.add_node("out_of_scope", out_of_scope_node)
     graph.add_node("respond", respond_node)
 
-    graph.add_edge(START, "router")
+    # Screening comes first, and a blocked message goes straight to END —
+    # it never reaches the router, the database, or the model.
+    graph.add_edge(START, "guardrail")
+    graph.add_conditional_edges(
+        "guardrail",
+        _route_after_guardrail,
+        {"router": "router", "blocked": END},
+    )
     graph.add_conditional_edges(
         "router",
         _route_from_intent,
@@ -457,21 +502,34 @@ def check_llm_connection() -> dict:
         return {"ok": False, "model": LLM_MODEL, "detail": f"{type(exc).__name__}: {exc}"}
 
 
+USER_FACING_ERROR = (
+    "I couldn't process that request. Please try asking about store sales, "
+    "forecasts, promotions, or which stores need attention."
+)
+
+
 def run_agent(user_query: str, session_id: str = "default") -> str:
     """Synchronous agent call."""
     try:
         result = _get_graph().invoke({"query": user_query, "session_id": session_id})
-        return result.get("response") or "Sorry, I couldn't generate a response for that question."
-    except Exception as exc:
-        return f"⚠️ Something went wrong while processing your question: {exc}"
+        if result.get("error"):
+            # Kept server-side only; the user sees the answer, not the plumbing.
+            logger.warning("agent run completed with degraded path: %s", result["error"])
+        return result.get("response") or USER_FACING_ERROR
+    except Exception:
+        # exc_info goes to the log, never into the returned string: a raw
+        # exception can carry SQL, file paths and schema details.
+        logger.exception("agent run failed for session %s", session_id)
+        return USER_FACING_ERROR
 
 
 def run_agent_stream(user_query: str, session_id: str = "default") -> Generator[str, None, None]:
     """Streaming version for Streamlit chat UI."""
     try:
         response = run_agent(user_query, session_id)
-    except Exception as exc:
-        yield f"⚠️ Something went wrong while processing your question: {exc}"
+    except Exception:
+        logger.exception("agent stream failed for session %s", session_id)
+        yield USER_FACING_ERROR
         return
 
     words = response.split(" ")
