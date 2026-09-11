@@ -27,6 +27,39 @@ CURVEBALL_QUESTION = (
     "history tell me?"
 )
 
+# Columns the current pipeline produces. A retail.db built by an older version
+# of data_pipeline.py is missing some of them, which surfaces as a confusing
+# DatabaseError deep inside model_engine rather than "your database is stale".
+_REQUIRED_SALES_COLUMNS = {
+    "Store", "Date", "Sales", "Promo",
+    "CompetitionDistance", "CompetitionOpenMonths",
+    "DaysSinceLastPromo", "DaysUntilNextPromo",
+}
+
+
+def _real_db_is_usable() -> tuple[bool, str]:
+    """Whether retail.db exists AND matches the schema the code expects."""
+    if not DB_PATH.exists():
+        return False, "no retail.db — run: python src/data_pipeline.py"
+    try:
+        import sqlite3
+
+        with sqlite3.connect(DB_PATH) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sales)")}
+    except Exception as exc:  # pragma: no cover - depends on local file state
+        return False, f"retail.db unreadable ({exc}) — rebuild: python src/data_pipeline.py"
+
+    missing = _REQUIRED_SALES_COLUMNS - columns
+    if missing:
+        return False, (
+            f"retail.db is stale, missing {sorted(missing)} — "
+            "rebuild it: python src/data_pipeline.py"
+        )
+    return True, ""
+
+
+_DB_USABLE, _DB_SKIP_REASON = _real_db_is_usable()
+
 
 @pytest.fixture(autouse=True)
 def use_mock_data(monkeypatch):
@@ -210,7 +243,7 @@ def test_build_graph_compiles():
     assert graph is not None
 
 
-@pytest.mark.skipif(not DB_PATH.exists(), reason="needs a built retail.db (python src/data_pipeline.py)")
+@pytest.mark.skipif(not _DB_USABLE, reason=_DB_SKIP_REASON)
 def test_store_with_no_competition_data_does_not_crash(monkeypatch):
     """354 of the 1,115 stores have a NULL CompetitionOpenMonths, which made
     the feature row object-dtype and caused the model to reject it outright.
