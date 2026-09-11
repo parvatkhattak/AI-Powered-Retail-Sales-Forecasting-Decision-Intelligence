@@ -129,6 +129,39 @@ This is reinforced two ways beyond just the prompt text:
 checks this at the data layer too: every number quoted in a report's text
 must equal a number the module itself computed, not a free-floating string.
 
+## 5b. Scope guardrail — refusing what the data can't answer
+
+Hallucination prevention above keeps the LLM from inventing *numbers*. This
+keeps the agent from answering questions it has no business answering at all.
+
+The Router classifies an off-topic question as `out_of_scope`, which routes to
+`out_of_scope_node` — a node that returns a fixed refusal **without touching
+the database or the LLM**, then goes straight to `END`:
+
+```
+router --out_of_scope--> out_of_scope --> END     (no DB call, no LLM call)
+```
+
+A question is in scope if it names a store ID, or uses vocabulary from this
+dataset (sales, forecast, promo, uplift, fleet, anomaly…). Everything else —
+general knowledge, questions about the assistant, "ignore your instructions"
+style prompts — gets the refusal.
+
+Two details worth knowing:
+
+- **The scope check is enforced in code, not delegated to the model.** An LLM
+  asked to pick from a fixed set of labels will always pick one, so an
+  off-topic question would otherwise be forced into `performance` and routed
+  to a data node. `out_of_scope` exists in the router prompt too, but code has
+  the final say.
+- **Why it matters:** before this existed, *any* question with no store ID
+  fell through to the data analyst node, which called `get_eda_summary()` — so
+  "who is \<a cricketer\>" was answered with the chain's average daily revenue.
+  `tests/test_agent_graph.py::test_off_topic_questions_get_a_refusal_not_sales_data`
+  asserts the database is never even reached for those queries, and
+  `test_in_scope_fleet_question_still_reaches_the_data_layer` guards the
+  opposite failure — a legitimate fleet-wide question being refused.
+
 ## 6. Graceful degradation (no API key, no database yet)
 
 Two failure modes are handled explicitly, both covered by tests:
@@ -138,6 +171,16 @@ Two failure modes are handled explicitly, both covered by tests:
   template-formatted responses built directly from `tool_results` /
   `decision_report`). The agent still answers correctly, just without
   LLM-polished prose.
+
+  > ⚠️ Because that fallback produces a perfectly plausible answer, a broken
+  > LLM used to be **invisible** — the app looked like it was working when it
+  > had never once reached OpenRouter. Both fallbacks now log a warning and
+  > record the reason in `state["error"]`. To check directly, run:
+  > ```python
+  > from src.agent_graph import check_llm_connection
+  > print(check_llm_connection())   # {"ok": True/False, "model": ..., "detail": ...}
+  > ```
+  > If `ok` is False, the response text you're seeing is the template, not the LLM.
 - **`USE_MOCKS=False` but `retail.db` / model files don't exist yet**
   (e.g. before Himanshu/Ashutosh's pipelines have been run locally) →
   `run_agent()` / `run_agent_stream()` catch the exception and return a

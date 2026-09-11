@@ -20,6 +20,7 @@ deterministic template so the agent never crashes without one).
 """
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -35,16 +36,39 @@ from pydantic import BaseModel, Field
 from config import LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE
 from src import database, decision_engine, model_engine, prompts
 
-Intent = Literal["performance", "forecast", "recommend", "whatif"]
+logger = logging.getLogger(__name__)
+
+Intent = Literal["performance", "forecast", "recommend", "whatif", "out_of_scope"]
 
 # Only numbers that follow the word "store(s)" count as store IDs — avoids
 # false positives like "top 10 stores" or "next 7 days" (rule: never hardcode
 # a store ID, always extract dynamically from the query).
 _STORE_MENTION_RE = re.compile(
-    r"stores?\s*(?:id[s]?)?\s*[:#]?\s*((?:(?:\s*(?:,|and|&|/)\s*)*\d+\s*)+)", re.IGNORECASE
+    r"stores?\s*(?:id[s]?)?\s*[:#]?\s*"
+    # Separators come *before* each number and repeat, so compound joins like
+    # "400, and 500" are matched as one list rather than stopping at "and".
+    r"((?:(?:\s*(?:,|and|&|/|-|–|—|to|through)\s*)*\d+\s*)+)",
+    re.IGNORECASE,
 )
+_RANGE_RE = re.compile(r"(\d+)\s*(?:-|–|—|\bto\b|\bthrough\b)\s*(\d+)", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\d+")
 _MIN_STORE_ID, _MAX_STORE_ID = 1, 1115
+
+# A chat answer comparing more than a handful of stores is unreadable, and each
+# store costs a full forecast + SHAP run. Ranges like "stores 100-500" are
+# capped to this many and the response says so, rather than silently analysing
+# an arbitrary subset (or hanging on 401 forecasts).
+_MAX_STORES_PER_QUERY = 5
+
+# A question with no store ID is only in scope if it is recognisably about this
+# retail dataset — otherwise "who is <celebrity>" used to fall through to the
+# fleet-wide EDA summary and answer with sales statistics.
+_RETAIL_VOCAB = (
+    "store", "sales", "sale", "revenue", "forecast", "predict", "promo",
+    "promotion", "uplift", "customer", "trend", "fleet", "performance",
+    "performing", "perform", "anomaly", "underperform", "shap", "rmspe",
+    "footfall", "assortment", "storetype", "holiday",
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -63,22 +87,66 @@ class RouterOutput(BaseModel):
     intent: Intent = Field(description="The single best-matching intent for the user's question.")
 
 
+def _expand_ranges(span: str) -> str:
+    """Rewrite "100-500" / "100 to 500" into the individual IDs they stand for,
+    so a range reads the same as an explicit list to the number scanner."""
+    def expand(match: re.Match) -> str:
+        low, high = int(match.group(1)), int(match.group(2))
+        if low > high:
+            low, high = high, low
+        # Bounded here as well as at the end so a huge range can't build a
+        # multi-thousand-element string before being truncated.
+        high = min(high, low + _MAX_STORES_PER_QUERY)
+        return " ".join(str(n) for n in range(low, high + 1))
+
+    return _RANGE_RE.sub(expand, span)
+
+
 def _extract_store_ids(query: str) -> list[int]:
+    """Store IDs mentioned in the query, honouring explicit lists ("100, 200 and
+    300") and ranges ("100-500", "100 to 500"), capped at _MAX_STORES_PER_QUERY."""
     ids: list[int] = []
     seen: set[int] = set()
     for mention in _STORE_MENTION_RE.finditer(query):
-        for num in _NUMBER_RE.findall(mention.group(1)):
+        for num in _NUMBER_RE.findall(_expand_ranges(mention.group(1))):
             sid = int(num)
             if _MIN_STORE_ID <= sid <= _MAX_STORE_ID and sid not in seen:
                 seen.add(sid)
                 ids.append(sid)
-    return ids
+    return ids[:_MAX_STORES_PER_QUERY]
+
+
+def _mentions_more_stores_than_analysed(query: str) -> bool:
+    """True when the query asked about more stores than the cap allows, so the
+    answer can say so instead of quietly dropping them."""
+    mentioned: set[int] = set()
+    for mention in _STORE_MENTION_RE.finditer(query):
+        for num in _NUMBER_RE.findall(mention.group(1)):
+            sid = int(num)
+            if _MIN_STORE_ID <= sid <= _MAX_STORE_ID:
+                mentioned.add(sid)
+        for match in _RANGE_RE.finditer(mention.group(1)):
+            low, high = sorted((int(match.group(1)), int(match.group(2))))
+            if high - low > _MAX_STORES_PER_QUERY:
+                return True
+    return len(mentioned) > _MAX_STORES_PER_QUERY
+
+
+def _is_in_scope(query: str, store_ids: list[int]) -> bool:
+    """A named store always counts; otherwise the question has to be
+    recognisably about this retail dataset."""
+    if store_ids:
+        return True
+    q = query.lower()
+    return any(term in q for term in _RETAIL_VOCAB)
 
 
 def _classify_intent_fallback(query: str, store_ids: list[int]) -> Intent:
     """Keyword-based classifier used when no LLM is available (per docs/architecture.md
     6.3: "keyword matching + LLM classification")."""
     q = query.lower()
+    if not _is_in_scope(query, store_ids):
+        return "out_of_scope"
     if "promo" in q and any(k in q for k in ("what if", "what-if", "simulate", "toggle", " if we", " if they")):
         return "whatif"
     # Checked before "forecast" keywords: a multi-store or "which should I focus
@@ -108,6 +176,7 @@ def _get_llm():
 def router_node(state: AgentState) -> dict:
     query = state["query"]
     store_ids = _extract_store_ids(query)
+    error = None
 
     try:
         structured_llm = _get_llm().with_structured_output(RouterOutput)
@@ -116,10 +185,21 @@ def router_node(state: AgentState) -> dict:
             HumanMessage(content=query),
         ])
         intent = decision.intent
-    except Exception:
+    except Exception as exc:
+        # Logged, not swallowed: a silently-failing LLM previously looked
+        # identical to a working one, because the deterministic fallback
+        # still produced a plausible answer.
+        logger.warning("LLM intent classification failed, using keyword fallback: %s", exc)
+        error = f"router_llm: {exc}"
         intent = _classify_intent_fallback(query, store_ids)
 
-    return {"store_ids": store_ids, "intent": intent, "error": None}
+    # The scope check is enforced in code, not left to the model: an LLM asked
+    # to pick from a fixed label set will always pick something, so an
+    # off-topic question would otherwise be routed to a data node.
+    if not _is_in_scope(query, store_ids):
+        intent = "out_of_scope"
+
+    return {"store_ids": store_ids, "intent": intent, "error": error}
 
 
 def data_analyst_node(state: AgentState) -> dict:
@@ -177,6 +257,28 @@ def decision_node(state: AgentState) -> dict:
         sources = []
 
     return {"decision_report": report, "data_sources": sources}
+
+
+OUT_OF_SCOPE_REPLY = (
+    "I'm the Retail AI assistant for this store network, so I can only answer "
+    "questions that this project's sales database and forecasting model can "
+    "actually back up — I won't guess at anything outside that.\n\n"
+    "Things I can answer:\n"
+    "- **Store performance** — \"How is Store 125 performing?\"\n"
+    "- **7-day forecasts** — \"What are expected sales for Store 300 next week?\"\n"
+    "- **Promotions** — \"Which stores have the highest promo uplift?\"\n"
+    "- **Where to focus** — \"I manage Stores 100, 200 and 300 — which needs attention?\""
+)
+
+
+def out_of_scope_node(state: AgentState) -> dict:
+    """Answers off-topic questions without touching the database or the LLM.
+
+    Without this, any question with no store ID fell through to the data
+    analyst node and was answered with fleet-wide sales statistics — so
+    "who is <a cricketer>" returned average daily revenue.
+    """
+    return {"response": OUT_OF_SCOPE_REPLY, "data_sources": [], "tool_results": {}}
 
 
 _PROMPT_BY_INTENT = {
@@ -252,11 +354,21 @@ def _compose_fallback(state: AgentState) -> str:
 
 def respond_node(state: AgentState) -> dict:
     context = state.get("decision_report") or state.get("tool_results") or {}
+    error = state.get("error")
 
     try:
         response = _compose_with_llm(state, context)
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM composition failed, using deterministic template: %s", exc)
+        error = f"{error + ' | ' if error else ''}compose_llm: {exc}"
         response = _compose_fallback(state)
+
+    if _mentions_more_stores_than_analysed(state.get("query", "")):
+        analysed = ", ".join(str(s) for s in state.get("store_ids", []))
+        response += (
+            f"\n\n> ℹ️ You asked about more stores than I analyse in one answer. "
+            f"This covers Stores {analysed} — ask again with a shorter list for the rest."
+        )
 
     sources = state.get("data_sources", [])
     if sources and "sources" not in response.lower():
@@ -268,11 +380,13 @@ def respond_node(state: AgentState) -> dict:
         sources_block = "\n".join(f"- {s}" for s in sources)
         response += f"\n\n📚 Sources:\n{sources_block}"
 
-    return {"response": response}
+    return {"response": response, "error": error}
 
 
 def _route_from_intent(state: AgentState) -> str:
     intent = state.get("intent")
+    if intent == "out_of_scope":
+        return "out_of_scope"
     if intent == "forecast":
         return "forecast"
     if intent in ("recommend", "whatif"):
@@ -291,17 +405,26 @@ def build_graph():
     graph.add_node("data_analyst", data_analyst_node)
     graph.add_node("forecast", forecast_node)
     graph.add_node("decision", decision_node)
+    graph.add_node("out_of_scope", out_of_scope_node)
     graph.add_node("respond", respond_node)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
         "router",
         _route_from_intent,
-        {"data_analyst": "data_analyst", "forecast": "forecast", "decision": "decision"},
+        {
+            "data_analyst": "data_analyst",
+            "forecast": "forecast",
+            "decision": "decision",
+            "out_of_scope": "out_of_scope",
+        },
     )
     graph.add_edge("data_analyst", "respond")
     graph.add_edge("forecast", "respond")
     graph.add_edge("decision", "respond")
+    # Straight to END: the refusal is already the final answer, and sending it
+    # through respond would hand an off-topic question to the LLM.
+    graph.add_edge("out_of_scope", END)
     graph.add_edge("respond", END)
 
     return graph.compile()
@@ -315,6 +438,23 @@ def _get_graph():
     if _graph is None:
         _graph = build_graph()
     return _graph
+
+
+def check_llm_connection() -> dict:
+    """Diagnostic: is the OpenRouter key/model actually reachable right now?
+
+    The agent degrades to a deterministic template when the LLM fails, which
+    looks like a working answer — so run this to tell "LLM is working" apart
+    from "LLM silently fell back". Returns {ok, model, detail}.
+    """
+    if not LLM_API_KEY:
+        return {"ok": False, "model": LLM_MODEL, "detail": "OPENROUTER_API_KEY is not set (check your .env file)"}
+
+    try:
+        reply = _get_llm().invoke([HumanMessage(content="Reply with the single word: ok")])
+        return {"ok": True, "model": LLM_MODEL, "detail": (reply.content or "").strip()[:80]}
+    except Exception as exc:
+        return {"ok": False, "model": LLM_MODEL, "detail": f"{type(exc).__name__}: {exc}"}
 
 
 def run_agent(user_query: str, session_id: str = "default") -> str:
