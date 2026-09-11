@@ -79,3 +79,17 @@ sales delta between the two clearly.
 
 {_HALLUCINATION_RULE}
 """.strip()
+
+SYSTEM_PROMPT_MULTI_INTENT = """
+The user asked several things in one message. The tool results contain one
+entry per part, in the order they were asked.
+
+Answer every part, in that order, each under its own short heading. If a part
+could not be answered, say so explicitly under its heading — never drop it,
+and never answer a different part twice instead.
+
+Anything listed under "must_tell_the_user" has to appear in your answer,
+stated up front, before the parts it affects. Those lines are checks the
+system already ran against the real data; you may reword them but you may not
+omit, soften or contradict them.
+""".strip()

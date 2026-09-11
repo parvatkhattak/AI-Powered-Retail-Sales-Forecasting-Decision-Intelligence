@@ -4,25 +4,37 @@ Owner: Saumya — Agentic AI Engineer
 
 Responsibilities:
 - Define LangGraph state and nodes
-- Route user queries
+- Understand, validate and route user queries
 - Execute tool calls
-- Format final responses
+- Format and check final responses
 
-Graph design (see docs/architecture.md, section 6.2):
+Graph design:
 
-    START -> Router -> {DataAnalyst | Forecast | Decision} -> Respond -> END
+    START -> Guardrail -> Understand -> Validate -> {Execute | Refuse} -> Respond -> END
 
-The Router classifies intent and extracts store IDs; exactly one
-downstream node runs real tool calls against database.py / model_engine.py
-/ decision_engine.py; Respond turns the tool results into the final
-markdown answer (LLM-composed when an API key is configured, otherwise a
-deterministic template so the agent never crashes without one).
+Each stage narrows what the answer is allowed to say:
+
+    Guardrail    screens the message (src/guardrails.py)
+    Understand   raw text -> structure: normalize, resolve context, extract
+                 entities, detect every intent in the query
+                 (src/query_understanding.py)
+    Validate     check the structure against what the data supports — store
+                 exists? date covered? horizon reachable? operation allowed?
+                 premise true? — and build the executable plan
+                 (src/validation.py)
+    Execute      run the real tools for each plan step
+    Respond      compose, then check the composed text against the grounded
+                 data before it leaves (src/response_validation.py)
+
+The LLM is never given tools, never sees the database, and never decides what
+is answerable. It phrases data that has already been fetched and checked.
 """
 
 import json
 import logging
 import re
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Generator, Literal, TypedDict
 
@@ -35,181 +47,132 @@ from pydantic import BaseModel, Field
 
 from config import LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE
 from src import database, decision_engine, guardrails, model_engine, prompts
+from src import query_understanding as qu
+from src import response_validation as rv
+from src import validation as dv
 
 logger = logging.getLogger(__name__)
 
 Intent = Literal["performance", "forecast", "recommend", "whatif", "out_of_scope"]
 
-# Only numbers that follow the word "store(s)" count as store IDs — avoids
-# false positives like "top 10 stores" or "next 7 days" (rule: never hardcode
-# a store ID, always extract dynamically from the query).
-_STORE_MENTION_RE = re.compile(
-    r"stores?\s*(?:id[s]?)?\s*[:#]?\s*"
-    # Separators come *before* each number and repeat, so compound joins like
-    # "400, and 500" are matched as one list rather than stopping at "and".
-    r"((?:(?:\s*(?:,|and|&|/|-|–|—|to|through)\s*)*\d+\s*)+)",
-    re.IGNORECASE,
-)
-_RANGE_RE = re.compile(r"(\d+)\s*(?:-|–|—|\bto\b|\bthrough\b)\s*(\d+)", re.IGNORECASE)
-_NUMBER_RE = re.compile(r"\d+")
+_MAX_STORES_PER_QUERY = qu.MAX_STORES_PER_QUERY
 _MIN_STORE_ID, _MAX_STORE_ID = 1, 1115
-
-# A chat answer comparing more than a handful of stores is unreadable, and each
-# store costs a full forecast + SHAP run. Ranges like "stores 100-500" are
-# capped to this many and the response says so, rather than silently analysing
-# an arbitrary subset (or hanging on 401 forecasts).
-_MAX_STORES_PER_QUERY = 5
-
-# A question with no store ID is only in scope if it is recognisably about this
-# retail dataset — otherwise "who is <celebrity>" used to fall through to the
-# fleet-wide EDA summary and answer with sales statistics.
-_RETAIL_VOCAB = (
-    "store", "sales", "sale", "revenue", "forecast", "predict", "promo",
-    "promotion", "uplift", "customer", "trend", "fleet", "performance",
-    "performing", "perform", "anomaly", "underperform", "shap", "rmspe",
-    "footfall", "assortment", "storetype", "holiday",
-)
 
 
 class AgentState(TypedDict, total=False):
     query: str                    # Original user question
-    session_id: str                # For conversation memory
-    intent: Intent                # "performance" | "forecast" | "recommend" | "whatif"
-    store_ids: list[int]          # Extracted store IDs from query
-    tool_results: dict            # Raw data returned by tool calls
+    session_id: str               # For conversation memory
+    intent: Intent                # Primary intent (first plan step)
+    store_ids: list[int]          # Validated store IDs from the query
+    understanding: object         # query_understanding.Understanding
+    validation: object            # validation.ValidationResult
+    steps: list[dict]             # One entry per executed plan step
+    tool_results: dict            # Merged raw data returned by tool calls
     decision_report: dict         # Structured output from decision_engine
     response: str                 # Final formatted response for the user
     data_sources: list[str]       # Citation list for UI citation cards
+    grounding: object             # response_validation.Grounding used to check the answer
     error: str | None             # Internal detail for logs — never shown to the user
     blocked_reason: str | None    # Guardrail category when a message was refused
+    # Conversation memory, carried between turns of one session.
+    previous_stores: list[int]
+    previous_intents: list[str]
+    previous_metrics: list[str]
+    previous_comparison: bool
+    previous_date_range: list[str]
 
 
 class RouterOutput(BaseModel):
     intent: Intent = Field(description="The single best-matching intent for the user's question.")
 
 
-def _expand_ranges(span: str) -> str:
-    """Rewrite "100-500" / "100 to 500" into the individual IDs they stand for,
-    so a range reads the same as an explicit list to the number scanner."""
-    def expand(match: re.Match) -> str:
-        low, high = int(match.group(1)), int(match.group(2))
-        if low > high:
-            low, high = high, low
-        # Bounded here as well as at the end so a huge range can't build a
-        # multi-thousand-element string before being truncated.
-        high = min(high, low + _MAX_STORES_PER_QUERY)
-        return " ".join(str(n) for n in range(low, high + 1))
-
-    return _RANGE_RE.sub(expand, span)
-
+# ── Backwards-compatible helpers ─────────────────────────────────────────────
+# The understanding layer owns this logic now; these keep the public names other
+# modules, docs and tests already use pointing at one implementation.
 
 def _extract_store_ids(query: str) -> list[int]:
-    """Store IDs mentioned in the query, honouring explicit lists ("100, 200 and
-    300") and ranges ("100-500", "100 to 500"), capped at _MAX_STORES_PER_QUERY."""
-    ids: list[int] = []
-    seen: set[int] = set()
-    for mention in _STORE_MENTION_RE.finditer(query):
-        for num in _NUMBER_RE.findall(_expand_ranges(mention.group(1))):
-            sid = int(num)
-            if _MIN_STORE_ID <= sid <= _MAX_STORE_ID and sid not in seen:
-                seen.add(sid)
-                ids.append(sid)
-    return ids[:_MAX_STORES_PER_QUERY]
+    """Store IDs in the query, bounded to the dataset's ID range."""
+    return [
+        sid for sid in qu.extract_store_candidates(query)
+        if _MIN_STORE_ID <= sid <= _MAX_STORE_ID
+    ][:_MAX_STORES_PER_QUERY]
 
 
 def _mentions_more_stores_than_analysed(query: str) -> bool:
-    """True when the query asked about more stores than the cap allows, so the
-    answer can say so instead of quietly dropping them."""
-    mentioned: set[int] = set()
-    for mention in _STORE_MENTION_RE.finditer(query):
-        for num in _NUMBER_RE.findall(mention.group(1)):
-            sid = int(num)
-            if _MIN_STORE_ID <= sid <= _MAX_STORE_ID:
-                mentioned.add(sid)
-        for match in _RANGE_RE.finditer(mention.group(1)):
-            low, high = sorted((int(match.group(1)), int(match.group(2))))
-            if high - low > _MAX_STORES_PER_QUERY:
-                return True
-    return len(mentioned) > _MAX_STORES_PER_QUERY
-
-
-# Fleet-level questions (no store ID named) used to have exactly one handler —
-# get_eda_summary() — so "top 10 performers", "average sales" and "best store"
-# all returned the same paragraph. These decide which fleet report to run.
-_RANKING_RE = re.compile(r"\b(top|bottom|best|worst|highest|lowest|rank(?:ed|ing)?)\b", re.IGNORECASE)
-_WORST_RE = re.compile(r"\b(bottom|worst|lowest|underperform\w*|weakest)\b", re.IGNORECASE)
-_PROMO_RE = re.compile(r"\b(promo\w*|uplift)\b", re.IGNORECASE)
-_COUNT_RE = re.compile(r"\b(?:top|bottom|best|worst|first|last)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:stores?|performers?)\b", re.IGNORECASE)
-_PLURAL_RE = re.compile(r"\b(stores|performers|shops|outlets|ones)\b", re.IGNORECASE)
-
-_DEFAULT_RANKING_SIZE = 10
-_MAX_RANKING_SIZE = 25
+    return qu.mentions_more_stores_than(query)
 
 
 def _parse_fleet_request(query: str) -> dict:
-    """Work out which fleet-wide report a store-less question is asking for.
-
-    How many rows to return follows the phrasing, so the answer matches the
-    question: an explicit count wins ("top 15" -> 15); otherwise plural asks
-    for a list ("best stores" -> 10) and singular asks for one ("best store
-    among all" -> just that store).
-    """
-    wants_ranking = bool(_RANKING_RE.search(query))
-    match = _COUNT_RE.search(query)
-    requested = next((int(g) for g in (match.groups() if match else []) if g), None)
-
-    if _PROMO_RE.search(query) and wants_ranking:
-        kind = "promo_ranking"
-    elif wants_ranking or requested is not None:
-        kind = "sales_ranking"
-    else:
-        kind = "summary"
-
-    if requested is not None:
-        size = min(requested, _MAX_RANKING_SIZE)
-    elif _PLURAL_RE.search(query):
-        size = _DEFAULT_RANKING_SIZE
-    else:
-        size = 1
-
-    return {
-        "kind": kind,
-        "n": size,
-        "ascending": bool(_WORST_RE.search(query)),
-    }
+    return qu.parse_fleet_request(query)
 
 
 def _is_in_scope(query: str, store_ids: list[int]) -> bool:
-    """A named store always counts; otherwise the question has to be
-    recognisably about this retail dataset."""
-    if store_ids:
-        return True
-    q = query.lower()
-    if any(term in q for term in _RETAIL_VOCAB):
-        return True
-    # "top 15" / "bottom 5" on its own is ranking phrasing, which in a store
-    # analytics tool means stores — without this, a bare "top 15" was refused
-    # as off-topic.
-    return bool(_COUNT_RE.search(query) and _RANKING_RE.search(query))
+    return qu.is_in_scope(query, store_ids)
 
 
 def _classify_intent_fallback(query: str, store_ids: list[int]) -> Intent:
-    """Keyword-based classifier used when no LLM is available (per docs/architecture.md
-    6.3: "keyword matching + LLM classification")."""
-    q = query.lower()
-    if not _is_in_scope(query, store_ids):
-        return "out_of_scope"
-    if "promo" in q and any(k in q for k in ("what if", "what-if", "simulate", "toggle", " if we", " if they")):
-        return "whatif"
-    # Checked before "forecast" keywords: a multi-store or "which should I focus
-    # on" question usually also mentions the forecast horizon, but it's asking
-    # for a ranked recommendation, not a plain forecast.
-    if any(k in q for k in ("focus", "recommend", "priorit", "should i", "compare")) or len(store_ids) > 1:
-        return "recommend"
-    if any(k in q for k in ("forecast", "predict", "expect", "next week", "next 7 days")):
-        return "forecast"
-    return "performance"
+    """Keyword-based classification for one query, with no LLM involved."""
+    understanding = qu.understand(query, _reference_date())
+    return understanding.primary_intent  # type: ignore[return-value]
 
+
+# ── Conversation memory ──────────────────────────────────────────────────────
+
+# What each session has already established. A follow-up like "which one should
+# I prioritise?" names no store, so without this the agent had nothing to
+# resolve the question against and fell back to a generic refusal — even though
+# it had just been asked about two specific stores.
+_SESSION_MEMORY: dict[str, dict] = {}
+_MAX_SESSIONS_REMEMBERED = 200
+
+_CONTEXT_KEYS = ("previous_stores", "previous_intents", "previous_metrics",
+                 "previous_comparison", "previous_date_range")
+
+
+def get_session_context(session_id: str) -> dict:
+    return dict(_SESSION_MEMORY.get(session_id, {}))
+
+
+def reset_session(session_id: str | None = None) -> None:
+    """Clear one session's memory, or all of it."""
+    if session_id is None:
+        _SESSION_MEMORY.clear()
+    else:
+        _SESSION_MEMORY.pop(session_id, None)
+
+
+def _remember(session_id: str, understanding, result) -> None:
+    if len(_SESSION_MEMORY) > _MAX_SESSIONS_REMEMBERED:
+        _SESSION_MEMORY.clear()
+
+    # Accumulated, not replaced: three turns about Store 125 then Store 220
+    # then "which one should I prioritise?" has to resolve to *both*, and
+    # overwriting each turn left only the most recent one.
+    earlier = _SESSION_MEMORY.get(session_id, {}).get("previous_stores", [])
+    fresh = result.known_stores or list(understanding.entities.store_candidates)
+    stores = list(dict.fromkeys(fresh + list(earlier)))[:_MAX_STORES_PER_QUERY]
+
+    dates = understanding.entities.dates
+    _SESSION_MEMORY[session_id] = {
+        "previous_stores": sorted(stores),
+        "previous_intents": understanding.intent_types,
+        "previous_metrics": list(understanding.entities.metrics),
+        "previous_comparison": understanding.entities.comparison,
+        "previous_date_range": [dates[0].start.isoformat(), dates[-1].end.isoformat()] if dates else [],
+    }
+
+
+def _reference_date() -> date:
+    """The dataset's own "today" — never the wall clock.
+
+    Rossmann's history ends mid-2015, so resolving "yesterday" against the real
+    date lands a decade past the end of the data. Every relative expression in
+    a question resolves against the newest day on record instead.
+    """
+    return dv.get_coverage().history_end
+
+
+# ── LLM ──────────────────────────────────────────────────────────────────────
 
 _llm = None
 
@@ -223,17 +186,13 @@ def _get_llm():
     return _llm
 
 
-# ── Nodes ────────────────────────────────────────────────────────────────────
-
 def _classify_intent_with_llm(query: str) -> Intent:
     """Ask the model for one intent word and match it against the allowed set.
 
     Deliberately a plain completion rather than with_structured_output():
     structured output needs tool/function-calling support, which the free
     OpenRouter models don't all have — on those, every routing call failed and
-    the agent silently ran on keywords alone. A one-word answer works on any
-    model, and an unrecognised answer is treated as a failure rather than
-    being passed downstream.
+    the agent silently ran on keywords alone.
     """
     reply = _get_llm().invoke([
         SystemMessage(content=prompts.SYSTEM_PROMPT_ROUTER),
@@ -247,10 +206,12 @@ def _classify_intent_with_llm(query: str) -> Intent:
     raise ValueError(f"model returned an unrecognised intent: {raw[:60]!r}")
 
 
+# ── Nodes ────────────────────────────────────────────────────────────────────
+
 def guardrail_node(state: AgentState) -> dict:
     """First node in the graph: screen the message before anything else runs.
 
-    Runs ahead of the router so a blocked message never reaches the LLM, the
+    Runs ahead of everything so a blocked message never reaches the LLM, the
     database, or the model — the refusal is produced entirely from code.
     """
     verdict = guardrails.screen_input(state.get("query", ""))
@@ -260,99 +221,235 @@ def guardrail_node(state: AgentState) -> dict:
     return {"blocked_reason": None}
 
 
-def router_node(state: AgentState) -> dict:
+def understand_node(state: AgentState) -> dict:
+    """Raw text -> structure, with this session's earlier turns available."""
     query = state["query"]
-    store_ids = _extract_store_ids(query)
-    error = None
+    context = get_session_context(state.get("session_id", "default"))
+    understanding = qu.understand(query, _reference_date(), context)
 
-    try:
-        intent = _classify_intent_with_llm(query)
-    except Exception as exc:
-        # Logged, not swallowed: a silently-failing LLM previously looked
-        # identical to a working one, because the deterministic fallback
-        # still produced a plausible answer.
-        logger.warning("LLM intent classification failed, using keyword fallback: %s", exc)
-        error = f"router_llm: {exc}"
-        intent = _classify_intent_fallback(query, store_ids)
-
-    # The scope check is enforced in code, not left to the model: an LLM asked
-    # to pick from a fixed label set will always pick something, so an
-    # off-topic question would otherwise be routed to a data node.
-    if not _is_in_scope(query, store_ids):
-        intent = "out_of_scope"
-
-    return {"store_ids": store_ids, "intent": intent, "error": error}
+    return {
+        "understanding": understanding,
+        "store_ids": [s for s in understanding.entities.store_candidates
+                      if _MIN_STORE_ID <= s <= _MAX_STORE_ID][:_MAX_STORES_PER_QUERY],
+        "intent": understanding.primary_intent,
+        **{key: context.get(key) for key in _CONTEXT_KEYS if context.get(key) is not None},
+    }
 
 
-def data_analyst_node(state: AgentState) -> dict:
-    """Tools: get_store_metrics, get_promo_history, get_sales_trend (database.py)."""
-    store_ids = state.get("store_ids", [])
+def validate_node(state: AgentState) -> dict:
+    """Check the structured question against what the data can support."""
+    understanding = state["understanding"]
+    context = get_session_context(state.get("session_id", "default"))
+    result = dv.validate(understanding, context)
+
+    _remember(state.get("session_id", "default"), understanding, result)
+
+    return {
+        "validation": result,
+        "store_ids": result.known_stores[:_MAX_STORES_PER_QUERY],
+        "intent": result.plan[0].type if result.plan else understanding.primary_intent,
+    }
+
+
+# ── Tool handlers, one per intent ────────────────────────────────────────────
+
+def _run_performance(step) -> dict:
+    """Tools: get_store_metrics, get_promo_history, get_sales_trend (database.py),
+    or the fleet-wide report that matches the question when no store is named."""
     tool_results: dict = {}
     sources: list[str] = []
 
-    if store_ids:
-        metrics_df = database.get_store_metrics(store_ids, days=30)
+    if step.stores:
+        metrics_df = database.get_store_metrics(step.stores, days=30)
         tool_results["store_metrics"] = metrics_df.to_dict(orient="records")
-        tool_results["promo_history"] = {sid: database.get_promo_history(sid) for sid in store_ids}
+        tool_results["promo_history"] = {sid: database.get_promo_history(sid) for sid in step.stores}
         tool_results["sales_trend"] = {
-            sid: database.get_sales_trend(sid).to_dict(orient="records") for sid in store_ids
+            sid: database.get_sales_trend(sid).to_dict(orient="records") for sid in step.stores
         }
-        sources = ["database.get_store_metrics", "database.get_promo_history", "database.get_sales_trend"]
+        sources = ["database.get_store_metrics", "database.get_promo_history",
+                   "database.get_sales_trend"]
     else:
         # No store named: pick the fleet-wide report that matches the question,
         # instead of always returning the same overall summary.
-        request = _parse_fleet_request(state.get("query", ""))
+        request = qu.parse_fleet_request(step.clause)
         tool_results["fleet_request"] = request
 
         if request["kind"] == "promo_ranking":
-            ranking = database.get_promo_uplift_ranking(top_n=request["n"])
-            tool_results["promo_ranking"] = ranking.to_dict(orient="records")
+            tool_results["promo_ranking"] = database.get_promo_uplift_ranking(
+                top_n=request["n"]).to_dict(orient="records")
             sources = ["database.get_promo_uplift_ranking"]
         elif request["kind"] == "sales_ranking":
-            ranking = database.get_store_sales_ranking(top_n=request["n"], ascending=request["ascending"])
-            tool_results["sales_ranking"] = ranking.to_dict(orient="records")
+            tool_results["sales_ranking"] = database.get_store_sales_ranking(
+                top_n=request["n"], ascending=request["ascending"]).to_dict(orient="records")
             sources = ["database.get_store_sales_ranking"]
         else:
             tool_results["eda_summary"] = database.get_eda_summary()
             sources = ["database.get_eda_summary"]
 
-    return {"tool_results": tool_results, "data_sources": sources}
+    return {"tool_results": tool_results, "sources": sources}
 
 
-def forecast_node(state: AgentState) -> dict:
-    """Tools: get_7day_forecast, get_shap_explanations, get_baseline_comparison (model_engine.py)."""
-    store_ids = state.get("store_ids", [])
-    tool_results: dict = {"forecast": {}, "shap": {}, "baseline_comparison": {}}
+def _run_forecast(step) -> dict:
+    """Tools: get_7day_forecast, get_shap_explanations, get_baseline_comparison."""
+    tool_results: dict = {"forecast": {}, "shap": {}, "baseline_comparison": {}, "no_forecast": {}}
+    sources: list[str] = []
 
-    for sid in store_ids:
-        tool_results["forecast"][sid] = model_engine.get_7day_forecast(sid).to_dict(orient="records")
+    for sid in step.stores:
+        forecast = model_engine.get_7day_forecast(sid)
+        if forecast is None or forecast.empty:
+            tool_results["no_forecast"][sid] = _explain_missing_forecast(sid)
+            continue
+        tool_results["forecast"][sid] = forecast.to_dict(orient="records")
         tool_results["shap"][sid] = model_engine.get_shap_explanations(sid)
-        tool_results["baseline_comparison"][sid] = model_engine.get_baseline_comparison(sid).to_dict(orient="records")
+        tool_results["baseline_comparison"][sid] = model_engine.get_baseline_comparison(sid).to_dict(
+            orient="records")
+        sources = ["model_engine.get_7day_forecast", "model_engine.get_shap_explanations",
+                   "model_engine.get_baseline_comparison"]
 
-    sources = (
-        ["model_engine.get_7day_forecast", "model_engine.get_shap_explanations", "model_engine.get_baseline_comparison"]
-        if store_ids
-        else []
-    )
-    return {"tool_results": tool_results, "data_sources": sources}
+    return {"tool_results": tool_results, "sources": sources}
 
 
-def decision_node(state: AgentState) -> dict:
-    """Calls decision_engine.py, which internally fetches from both database.py and
-    model_engine.py (per docs/architecture.md 6.3, Decision Node)."""
-    store_ids = state.get("store_ids", [])
+def _explain_missing_forecast(store_id: int) -> dict:
+    """Why a real store has no forecast — said plainly instead of "no data".
 
-    if len(store_ids) > 1:
-        report = decision_engine.compare_stores_report(store_ids)
+    259 of the 1,115 stores aren't in the forecast calendar the model window is
+    built from. That is a coverage fact about this store, not a failure, and the
+    answer should say which it is.
+    """
+    detail = {"store_id": store_id, "reason": "not_in_forecast_window"}
+    try:
+        info = model_engine.get_missing_store_info(store_id)
+    except Exception as exc:
+        logger.warning("could not explain missing forecast for store %s: %s", store_id, exc)
+        info = None
+
+    if info:
+        detail["recent_avg_sales"] = round(float(info["recent_avg"]), 2)
+        detail["window_start"] = str(info["dates"][0])[:10]
+        detail["window_end"] = str(info["dates"][-1])[:10]
+    return detail
+
+
+def _run_whatif(step) -> dict:
+    """Tools: get_whatif_forecast with the promo forced on and off.
+
+    This node is the fix for what-if questions being answered as plain
+    forecasts: `model_engine.get_whatif_forecast()` existed the whole time and
+    nothing in the agent ever called it, so "what would happen if a promotion
+    were active" got whatever the ordinary forecast path produced.
+    """
+    tool_results: dict = {"whatif": {}, "no_forecast": {}}
+    sources: list[str] = []
+
+    for sid in step.stores:
+        with_promo = model_engine.get_whatif_forecast(sid, True)
+        without_promo = model_engine.get_whatif_forecast(sid, False)
+
+        if with_promo is None or with_promo.empty or without_promo is None or without_promo.empty:
+            tool_results["no_forecast"][sid] = _explain_missing_forecast(sid)
+            # A store with no forecast coverage can still be answered with its
+            # real promo history, which is what the question is actually about.
+            try:
+                tool_results.setdefault("promo_history", {})[sid] = database.get_promo_history(sid)
+                sources.append("database.get_promo_history")
+            except Exception as exc:
+                logger.warning("promo history unavailable for store %s: %s", sid, exc)
+            continue
+
+        with_avg = float(with_promo["PredictedSales"].mean())
+        without_avg = float(without_promo["PredictedSales"].mean())
+        tool_results["whatif"][sid] = {
+            "scenario": "promotion active on every open day of the forecast window",
+            "with_promo_avg": round(with_avg, 2),
+            "without_promo_avg": round(without_avg, 2),
+            "difference": round(with_avg - without_avg, 2),
+            "difference_pct": round((with_avg - without_avg) / without_avg * 100, 2) if without_avg else 0.0,
+            "with_promo_total": round(float(with_promo["PredictedSales"].sum()), 2),
+            "without_promo_total": round(float(without_promo["PredictedSales"].sum()), 2),
+            "days": len(with_promo),
+            "with_promo_daily": with_promo.to_dict(orient="records"),
+            "without_promo_daily": without_promo.to_dict(orient="records"),
+        }
+        sources.append("model_engine.get_whatif_forecast")
+
+    return {"tool_results": tool_results, "sources": sorted(set(sources))}
+
+
+def _run_recommend(step) -> dict:
+    """Calls decision_engine.py, which internally fetches from both database.py
+    and model_engine.py."""
+    if len(step.stores) > 1:
+        report = decision_engine.compare_stores_report(step.stores)
         sources = sorted({s for r in report["ranked_stores"] for s in r["data_sources"]})
-    elif len(store_ids) == 1:
-        report = decision_engine.generate_decision_report(store_ids[0])
+    elif len(step.stores) == 1:
+        report = decision_engine.generate_decision_report(step.stores[0])
         sources = report["data_sources"]
     else:
         report = {"summary": "No specific store was identified in the question.", "ranked_stores": []}
         sources = []
 
-    return {"decision_report": report, "data_sources": sources}
+    # A report that contradicts itself must never reach the user; this is the
+    # same invariant the decision engine's own tests assert.
+    violations = decision_engine.check_report_consistency(report)
+    if violations:
+        logger.error("decision report failed its consistency check: %s", violations)
+
+    return {"tool_results": {"decision_report": report}, "sources": sources,
+            "decision_report": report, "consistency_violations": violations}
+
+
+_HANDLERS = {
+    "performance": _run_performance,
+    "forecast": _run_forecast,
+    "recommend": _run_recommend,
+    "whatif": _run_whatif,
+}
+
+
+def execute_node(state: AgentState) -> dict:
+    """Run every step of the validated plan, in the order the user asked."""
+    result = state["validation"]
+    steps: list[dict] = []
+    merged: dict = {}
+    sources: list[str] = []
+    decision_report: dict = {}
+    error = state.get("error")
+
+    for spec in result.plan:
+        handler = _HANDLERS.get(spec.type)
+        if handler is None:
+            continue
+        try:
+            outcome = handler(spec)
+        except Exception as exc:
+            # One failing step must not lose the answers to the others.
+            logger.warning("plan step %s failed: %s", spec.type, exc)
+            error = f"{error + ' | ' if error else ''}step_{spec.type}: {exc}"
+            if len(result.plan) == 1:
+                raise
+            continue
+
+        steps.append({
+            "intent": spec.type,
+            "stores": spec.stores,
+            "scope": spec.scope,
+            "metrics": spec.metrics,
+            "clause": spec.clause,
+            "tool_results": outcome["tool_results"],
+            "sources": outcome["sources"],
+        })
+        merged.update(outcome["tool_results"])
+        sources += outcome["sources"]
+        if outcome.get("decision_report"):
+            decision_report = outcome["decision_report"]
+
+    return {
+        "steps": steps,
+        "tool_results": merged,
+        "decision_report": decision_report,
+        "data_sources": list(dict.fromkeys(sources)),
+        "error": error,
+    }
 
 
 OUT_OF_SCOPE_REPLY = (
@@ -367,42 +464,154 @@ OUT_OF_SCOPE_REPLY = (
 )
 
 
-def out_of_scope_node(state: AgentState) -> dict:
-    """Answers off-topic questions without touching the database or the LLM.
+def refuse_node(state: AgentState) -> dict:
+    """The answer when validation left nothing answerable.
 
-    Without this, any question with no store ID fell through to the data
-    analyst node and was answered with fleet-wide sales statistics — so
-    "who is <a cricketer>" returned average daily revenue.
+    This is the node that stops the worst failure mode: a question the data
+    can't support being answered with a different question's data. If the store
+    doesn't exist, or the date is outside coverage, or the operation isn't one
+    this assistant performs, that is the answer — not a fleet summary.
     """
-    return {"response": OUT_OF_SCOPE_REPLY, "data_sources": [], "tool_results": {}}
+    result = state.get("validation")
+    findings = result.blocking_findings if result else []
+
+    if not findings:
+        return {"response": OUT_OF_SCOPE_REPLY, "data_sources": [], "tool_results": {}}
+
+    parts = [f.message for f in findings]
+    extra = [f.message for f in (result.notices if result else [])]
+    body = "\n\n".join(parts + extra)
+
+    # Say what *can* be asked, so a refusal is still useful.
+    body += (
+        "\n\nWhat I can answer instead:\n"
+        "- **Store performance** — \"How is Store 125 performing?\"\n"
+        "- **7-day forecasts** — \"What are expected sales for Store 300 next week?\"\n"
+        "- **Promotions** — \"Which stores have the highest promo uplift?\"\n"
+        "- **Where to focus** — \"Of Stores 125 and 220, which needs attention?\""
+    )
+    return {"response": body, "data_sources": [], "tool_results": {}}
 
 
-_PROMPT_BY_INTENT = {
-    "performance": prompts.SYSTEM_PROMPT_ANALYST,
-    "forecast": prompts.SYSTEM_PROMPT_FORECAST,
-    "recommend": prompts.SYSTEM_PROMPT_DECISION,
-    "whatif": prompts.SYSTEM_PROMPT_WHATIF,
-}
+# ── Deterministic composition ────────────────────────────────────────────────
+# Every figure printed here is registered with the Grounding object as it is
+# formatted, so this path passes the numeric-grounding check by construction.
+
+def _money(value, grounding: rv.Grounding) -> str:
+    grounding.add_number(value)
+    return f"€{value:,.0f}"
 
 
-def _compose_with_llm(state: AgentState, context: dict) -> str:
-    llm = _get_llm()
-    system_prompt = _PROMPT_BY_INTENT.get(state.get("intent"), prompts.SYSTEM_PROMPT_DECISION)
-    context_json = json.dumps(context, default=str, indent=2)
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"User question: {state['query']}\n\nTool results (the ONLY data you may reference):\n{context_json}"),
-    ]
-    return llm.invoke(messages).content
+def _pct(value, grounding: rv.Grounding, digits: int = 1) -> str:
+    grounding.add_number(value)
+    return f"{value:.{digits}f}%"
 
 
-def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: dict | None) -> str:
-    """Plain-language performance summary for one store, from rows the data
-    analyst node already fetched — average, direction of travel, promo uplift."""
+def _count(value, grounding: rv.Grounding) -> str:
+    grounding.add_number(value)
+    return f"{value:,}"
+
+
+def _performance_section(step: dict, grounding: rv.Grounding) -> str:
+    tool_results = step["tool_results"]
+
+    if step["stores"] and tool_results.get("store_metrics"):
+        wants_only_promo = step["metrics"] == ["promo_uplift"]
+        summaries = [
+            _summarise_store_performance(sid, tool_results["store_metrics"],
+                                         (tool_results.get("promo_history") or {}).get(sid),
+                                         grounding, promo_only=wants_only_promo)
+            for sid in step["stores"]
+        ]
+        return "\n\n".join(s for s in summaries if s)
+
+    if tool_results.get("sales_ranking"):
+        rows = tool_results["sales_ranking"]
+        ascending = tool_results.get("fleet_request", {}).get("ascending", False)
+        for row in rows:
+            grounding.add_store(row["Store"])
+
+        if len(rows) == 1:
+            r = rows[0]
+            superlative = "lowest-performing" if ascending else "best-performing"
+            return (
+                f"**Store {r['Store']} is the {superlative} store**, averaging "
+                f"**{_money(r['avg_daily_sales'], grounding)}/day**.\n\n"
+                f"That's {_money(r['total_sales'], grounding)} in total sales across "
+                f"{_count(r['days_trading'], grounding)} trading days."
+            )
+
+        label = "Lowest" if ascending else "Top"
+        grounding.add_number(len(rows))
+        lines = [f"**{label} {len(rows)} stores by average daily sales**\n"]
+        lines += [
+            f"{i}. **Store {r['Store']}** — {_money(r['avg_daily_sales'], grounding)}/day "
+            f"({_money(r['total_sales'], grounding)} total over "
+            f"{_count(r['days_trading'], grounding)} trading days)"
+            for i, r in enumerate(rows, start=1)
+        ]
+        return "\n".join(lines)
+
+    if tool_results.get("promo_ranking"):
+        rows = tool_results["promo_ranking"]
+        for row in rows:
+            grounding.add_store(row["Store"])
+
+        if len(rows) == 1:
+            r = rows[0]
+            return (
+                f"**Store {r['Store']} has the highest promotional uplift** at "
+                f"**{_pct(r['uplift_pct'], grounding)}**.\n\n"
+                f"It averages {_money(r['promo_avg_sales'], grounding)}/day on promo days versus "
+                f"{_money(r['non_promo_avg_sales'], grounding)}/day without one."
+            )
+
+        grounding.add_number(len(rows))
+        lines = [f"**Top {len(rows)} stores by promotional uplift**\n"]
+        lines += [
+            f"{i}. **Store {r['Store']}** — {_pct(r['uplift_pct'], grounding)} uplift "
+            f"(promo {_money(r['promo_avg_sales'], grounding)}/day vs non-promo "
+            f"{_money(r['non_promo_avg_sales'], grounding)}/day)"
+            for i, r in enumerate(rows, start=1)
+        ]
+        return "\n".join(lines)
+
+    if tool_results.get("eda_summary"):
+        s = tool_results["eda_summary"]
+        grounding.add_store(s.get("best_store_id"))
+        grounding.add_store(s.get("worst_store_id"))
+        return (
+            f"**Average daily sales across the fleet: "
+            f"{_money(s.get('avg_daily_sales', 0), grounding)}** "
+            f"({_count(s.get('total_stores', 0), grounding)} stores).\n\n"
+            f"- Best performer: **Store {s.get('best_store_id')}** at "
+            f"{_money(s.get('best_store_avg_sales', 0), grounding)}/day\n"
+            f"- Lowest performer: **Store {s.get('worst_store_id')}** at "
+            f"{_money(s.get('worst_store_avg_sales', 0), grounding)}/day"
+        )
+
+    return ""
+
+
+def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: dict | None,
+                                 grounding: rv.Grounding, promo_only: bool = False) -> str:
+    """Plain-language performance summary for one store — average, direction of
+    travel, promo uplift — built from rows already fetched."""
+    grounding.add_store(store_id)
     sales = [
         r["sales"] for r in metric_rows
         if r.get("store_id") == store_id and r.get("sales") is not None
     ]
+
+    if promo_only:
+        if not promo or not promo.get("uplift_pct"):
+            return f"No promotional history is recorded for Store {store_id}."
+        return (
+            f"**Store {store_id} promotional uplift: {_pct(promo['uplift_pct'], grounding)}** — "
+            f"{_money(promo.get('promo_avg_sales', 0), grounding)}/day on promo days versus "
+            f"{_money(promo.get('non_promo_avg_sales', 0), grounding)}/day without one."
+        )
+
     if not sales:
         return ""
 
@@ -412,38 +621,114 @@ def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: 
     if midpoint and sum(earlier):
         change = (sum(recent) / len(recent) - sum(earlier) / len(earlier)) / (sum(earlier) / len(earlier)) * 100
         direction = "up" if change >= 0 else "down"
-        trend = f"Sales are **{direction} {abs(change):.1f}%** across that period."
+        trend = f"Sales are **{direction} {_pct(abs(change), grounding)}** across that period."
     else:
         trend = "Not enough history yet to read a trend."
 
     lines = [
-        f"**Store {store_id} is averaging €{average:,.0f}/day** over the last "
-        f"{len(sales)} trading days.\n",
+        f"**Store {store_id} is averaging {_money(average, grounding)}/day** over the last "
+        f"{_count(len(sales), grounding)} trading days.\n",
         f"- {trend}",
-        f"- Best day €{max(sales):,.0f}, quietest day €{min(sales):,.0f}",
+        f"- Best day {_money(max(sales), grounding)}, quietest day {_money(min(sales), grounding)}",
     ]
     if promo and promo.get("uplift_pct"):
         lines.append(
-            f"- Promotions lift this store **{promo['uplift_pct']:.1f}%** "
-            f"(€{promo.get('promo_avg_sales', 0):,.0f}/day on promo vs "
-            f"€{promo.get('non_promo_avg_sales', 0):,.0f}/day without)"
+            f"- Promotions lift this store **{_pct(promo['uplift_pct'], grounding)}** "
+            f"({_money(promo.get('promo_avg_sales', 0), grounding)}/day on promo vs "
+            f"{_money(promo.get('non_promo_avg_sales', 0), grounding)}/day without)"
         )
     return "\n".join(lines)
 
 
-def _compose_fallback(state: AgentState) -> str:
-    """Deterministic formatting used when the LLM is unavailable — keeps the agent
-    testable and crash-free without an API key (docs/architecture.md 13, "Agent
-    Error Handling")."""
-    store_ids = state.get("store_ids", [])
-    report = state.get("decision_report")
-    tool_results = state.get("tool_results", {})
+def _forecast_section(step: dict, grounding: rv.Grounding) -> str:
+    tool_results = step["tool_results"]
+    lines: list[str] = []
 
-    if report and report.get("ranked_stores"):
-        lines = [f"**Priority ranking for stores {', '.join(map(str, store_ids))}:**\n"]
+    for sid, rows in (tool_results.get("forecast") or {}).items():
+        if not rows:
+            continue
+        grounding.add_store(sid)
+        values = [r["PredictedSales"] for r in rows]
+        average = sum(values) / len(values)
+        for row in rows:
+            grounding.add_date(str(row.get("Date")))
+        first_date, last_date = str(rows[0].get("Date"))[:10], str(rows[-1].get("Date"))[:10]
+        lines.append(
+            f"**Store {sid}: {_money(average, grounding)}/day forecast** for the "
+            f"{_count(len(rows), grounding)} days from {first_date} to {last_date} "
+            f"({_money(sum(values), grounding)} in total)."
+        )
+
+    for sid, detail in (tool_results.get("no_forecast") or {}).items():
+        grounding.add_store(sid)
+        note = (
+            f"**No forecast is available for Store {sid}.** It isn't in the forecast "
+            f"calendar the model's window is built from, so I won't estimate a number for it."
+        )
+        if detail.get("recent_avg_sales"):
+            note += (
+                f" What I do have is its recent trading average: "
+                f"{_money(detail['recent_avg_sales'], grounding)}/day."
+            )
+        lines.append(note)
+
+    return "\n\n".join(lines)
+
+
+def _whatif_section(step: dict, grounding: rv.Grounding) -> str:
+    tool_results = step["tool_results"]
+    lines: list[str] = []
+
+    for sid, sim in (tool_results.get("whatif") or {}).items():
+        grounding.add_store(sid)
+        sign = "+" if sim["difference"] >= 0 else "-"
+        lines.append(
+            f"**Store {sid} — promotion running every open day next week**\n\n"
+            f"- Without a promotion: **{_money(sim['without_promo_avg'], grounding)}/day** "
+            f"({_money(sim['without_promo_total'], grounding)} over "
+            f"{_count(sim['days'], grounding)} days)\n"
+            f"- With the promotion active: **{_money(sim['with_promo_avg'], grounding)}/day** "
+            f"({_money(sim['with_promo_total'], grounding)} over the same window)\n"
+            f"- Difference: **{sign}{_money(abs(sim['difference']), grounding)}/day "
+            f"({sign}{_pct(abs(sim['difference_pct']), grounding)})**"
+        )
+
+    for sid, detail in (tool_results.get("no_forecast") or {}).items():
+        grounding.add_store(sid)
+        note = (
+            f"**I can't simulate a promotion for Store {sid}.** The scenario needs a "
+            f"forecast to vary, and Store {sid} isn't in the forecast calendar the "
+            f"model's window is built from — so there's nothing to run the "
+            f"with-promo/without-promo comparison against, and I won't invent one."
+        )
+        promo = (tool_results.get("promo_history") or {}).get(sid)
+        if promo and promo.get("uplift_pct"):
+            note += (
+                f"\n\nWhat the store's own history does show: promotions have lifted "
+                f"Store {sid} by **{_pct(promo['uplift_pct'], grounding)}** on average — "
+                f"{_money(promo.get('promo_avg_sales', 0), grounding)}/day on promo days "
+                f"versus {_money(promo.get('non_promo_avg_sales', 0), grounding)}/day without."
+            )
+        if detail.get("recent_avg_sales"):
+            note += f" Its recent trading average is {_money(detail['recent_avg_sales'], grounding)}/day."
+        lines.append(note)
+
+    return "\n\n".join(lines)
+
+
+def _recommend_section(step: dict, grounding: rv.Grounding) -> str:
+    report = step["tool_results"].get("decision_report") or {}
+
+    if report.get("ranked_stores"):
+        stores = ", ".join(str(s) for s in step["stores"])
+        lines = [f"**Priority ranking for stores {stores}:**\n"]
         for i, r in enumerate(report["ranked_stores"], start=1):
+            grounding.add_store(r["store_id"])
+            grounding.add_number(r["risk_score"])
+            grounding.ingest(r)
             lines.append(
-                f"{i}. **Store {r['store_id']}** — risk: {r['risk_level']}\n"
+                f"{i}. **Store {r['store_id']}** — risk: {r['risk_level']} "
+                f"(score {r['risk_score']})\n"
                 f"   - 🔍 Observation: {r['observation']}\n"
                 f"   - 📈 Prediction: {r['prediction']}\n"
                 f"   - 📊 Evidence: {r['evidence']}\n"
@@ -452,7 +737,8 @@ def _compose_fallback(state: AgentState) -> str:
         lines.append(f"\n**Summary:** {report['summary']}")
         return "\n".join(lines)
 
-    if report and "observation" in report:
+    if "observation" in report:
+        grounding.ingest(report)
         return (
             f"🔍 **Observation:** {report['observation']}\n\n"
             f"📈 **Prediction:** {report['prediction']}\n\n"
@@ -460,170 +746,257 @@ def _compose_fallback(state: AgentState) -> str:
             f"✅ **Recommendation:** {report['recommendation']}"
         )
 
-    if tool_results.get("sales_ranking"):
-        rows = tool_results["sales_ranking"]
-        ascending = tool_results.get("fleet_request", {}).get("ascending", False)
+    return ""
 
-        if len(rows) == 1:
-            r = rows[0]
-            superlative = "lowest-performing" if ascending else "best-performing"
-            return (
-                f"**Store {r['Store']} is the {superlative} store**, averaging "
-                f"**€{r['avg_daily_sales']:,.0f}/day**.\n\n"
-                f"That's €{r['total_sales']:,.0f} in total sales across "
-                f"{r['days_trading']:,} trading days."
-            )
 
-        label = "Lowest" if ascending else "Top"
-        lines = [f"**{label} {len(rows)} stores by average daily sales**\n"]
-        lines += [
-            f"{i}. **Store {r['Store']}** — €{r['avg_daily_sales']:,.0f}/day "
-            f"(€{r['total_sales']:,.0f} total over {r['days_trading']:,} trading days)"
-            for i, r in enumerate(rows, start=1)
-        ]
-        return "\n".join(lines)
+_SECTION_BUILDERS = {
+    "performance": _performance_section,
+    "forecast": _forecast_section,
+    "recommend": _recommend_section,
+    "whatif": _whatif_section,
+}
 
-    if tool_results.get("promo_ranking"):
-        rows = tool_results["promo_ranking"]
+_SECTION_TITLES = {
+    "performance": "Recent performance",
+    "forecast": "7-day forecast",
+    "recommend": "Where to focus",
+    "whatif": "What-if scenario",
+}
 
-        if len(rows) == 1:
-            r = rows[0]
-            return (
-                f"**Store {r['Store']} has the highest promotional uplift** at "
-                f"**{r['uplift_pct']:.1f}%**.\n\n"
-                f"It averages €{r['promo_avg_sales']:,.0f}/day on promo days versus "
-                f"€{r['non_promo_avg_sales']:,.0f}/day without one."
-            )
+# When a clause asks for one specific metric, the heading should say that
+# metric — "Recent performance" over a promo-uplift answer describes the intent
+# label rather than what the section actually contains.
+_METRIC_TITLES = {
+    "promo_uplift": "Promotional uplift",
+    "anomaly": "Anomalies",
+    "drivers": "What is driving this",
+    "trend": "Sales trend",
+}
 
-        lines = [f"**Top {len(rows)} stores by promotional uplift**\n"]
-        lines += [
-            f"{i}. **Store {r['Store']}** — {r['uplift_pct']:.1f}% uplift "
-            f"(promo €{r['promo_avg_sales']:,.0f}/day vs non-promo €{r['non_promo_avg_sales']:,.0f}/day)"
-            for i, r in enumerate(rows, start=1)
-        ]
-        return "\n".join(lines)
 
-    if tool_results.get("eda_summary"):
-        s = tool_results["eda_summary"]
-        return (
-            f"**Average daily sales across the fleet: €{s.get('avg_daily_sales', 0):,.0f}** "
-            f"({s.get('total_stores', 'N/A')} stores).\n\n"
-            f"- Best performer: **Store {s.get('best_store_id')}** at "
-            f"€{s.get('best_store_avg_sales', 0):,.0f}/day\n"
-            f"- Lowest performer: **Store {s.get('worst_store_id')}** at "
-            f"€{s.get('worst_store_avg_sales', 0):,.0f}/day"
-        )
+def _section_title(step: dict) -> str:
+    if len(step.get("metrics") or []) == 1:
+        specific = _METRIC_TITLES.get(step["metrics"][0])
+        if specific:
+            return specific
+    return _SECTION_TITLES.get(step["intent"], step["intent"].title())
 
-    if tool_results.get("forecast"):
-        lines = []
-        for sid, rows in tool_results["forecast"].items():
-            if rows:
-                avg = sum(r["PredictedSales"] for r in rows) / len(rows)
-                lines.append(f"Store {sid}: 7-day forecast averages €{avg:,.0f}/day.")
-        return "\n".join(lines) if lines else "No forecast data available for the requested store(s)."
 
-    if tool_results.get("store_metrics"):
-        # Actually answer "how is this store doing" rather than reporting that
-        # rows were fetched, which told the user nothing.
-        summaries = [
-            _summarise_store_performance(sid, tool_results["store_metrics"],
-                                         (tool_results.get("promo_history") or {}).get(sid))
-            for sid in store_ids
-        ]
-        summaries = [s for s in summaries if s]
-        if summaries:
-            return "\n\n".join(summaries)
+def _compose_fallback(state: AgentState, grounding: rv.Grounding) -> str:
+    """Deterministic formatting — the grounded path.
 
-    return "I couldn't find enough data to answer that. Try mentioning a specific store ID, e.g. 'How is Store 100 performing?'"
+    Used when no LLM is configured, when the LLM call fails, and whenever the
+    LLM's own answer fails response validation. Every number it prints is
+    registered with `grounding` as it is formatted, so it cannot state a figure
+    the tools did not produce.
+    """
+    steps = state.get("steps") or []
+    if not steps:
+        return ("I couldn't find enough data to answer that. Try mentioning a specific "
+                "store ID, e.g. 'How is Store 100 performing?'")
+
+    sections: list[str] = []
+    show_titles = len(steps) > 1
+    for step in steps:
+        builder = _SECTION_BUILDERS.get(step["intent"])
+        body = builder(step, grounding) if builder else ""
+        if not body:
+            continue
+        if show_titles:
+            title = _section_title(step)
+            scope = f" — Store{'s' if len(step['stores']) > 1 else ''} " + \
+                    ", ".join(map(str, step["stores"])) if step["stores"] else " — fleet-wide"
+            sections.append(f"### {title}{scope}\n\n{body}")
+        else:
+            sections.append(body)
+
+    if not sections:
+        return ("I couldn't find enough data to answer that. Try mentioning a specific "
+                "store ID, e.g. 'How is Store 100 performing?'")
+
+    return "\n\n".join(sections)
+
+
+# ── LLM composition ──────────────────────────────────────────────────────────
+
+_PROMPT_BY_INTENT = {
+    "performance": prompts.SYSTEM_PROMPT_ANALYST,
+    "forecast": prompts.SYSTEM_PROMPT_FORECAST,
+    "recommend": prompts.SYSTEM_PROMPT_DECISION,
+    "whatif": prompts.SYSTEM_PROMPT_WHATIF,
+}
+
+
+def _llm_context(state: AgentState) -> dict:
+    """Everything the LLM is allowed to know: the tool output, and the limits
+    the validation layer established. It gets no tools and no database."""
+    result = state.get("validation")
+    return {
+        "question_parts": [
+            {"asked": step["clause"], "intent": step["intent"], "stores": step["stores"]}
+            for step in state.get("steps") or []
+        ],
+        "tool_results": [
+            {"intent": step["intent"], "stores": step["stores"], "data": step["tool_results"]}
+            for step in state.get("steps") or []
+        ],
+        "must_tell_the_user": [f.message for f in (result.findings if result else [])],
+        "dataset_coverage": result.coverage.as_dict() if result and result.coverage else {},
+    }
+
+
+def _compose_with_llm(state: AgentState, context: dict) -> str:
+    llm = _get_llm()
+    system_prompt = _PROMPT_BY_INTENT.get(state.get("intent"), prompts.SYSTEM_PROMPT_DECISION)
+    if len(state.get("steps") or []) > 1:
+        system_prompt = f"{prompts.SYSTEM_PROMPT_MULTI_INTENT}\n\n{system_prompt}"
+    context_json = json.dumps(context, default=str, indent=2)
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=(
+            f"User question: {state['query']}\n\n"
+            f"Tool results (the ONLY data you may reference):\n{context_json}"
+        )),
+    ]
+    return llm.invoke(messages).content
+
+
+def _build_grounding(state: AgentState) -> rv.Grounding:
+    grounding = rv.Grounding()
+    for step in state.get("steps") or []:
+        grounding.ingest(step["tool_results"])
+        for sid in step["stores"]:
+            grounding.add_store(sid)
+    result = state.get("validation")
+    if result:
+        for verdict in result.claim_verdicts:
+            if verdict.actual_value is not None:
+                grounding.add_number(verdict.actual_value)
+        # Figures quoted inside a finding's own message are grounded — they were
+        # computed from the data by the validation layer.
+        for finding in result.findings:
+            for token in re.findall(r"-?[\d,]+(?:\.\d+)?", finding.message):
+                grounding.add_number(token.replace(",", ""))
+        for store_id in result.known_stores + result.unknown_stores:
+            grounding.add_store(store_id)
+    return grounding
 
 
 def respond_node(state: AgentState) -> dict:
-    context = state.get("decision_report") or state.get("tool_results") or {}
+    """Compose the answer, then check it before letting it out."""
+    result = state.get("validation")
+    grounding = _build_grounding(state)
+    intent_types = [step["intent"] for step in state.get("steps") or []]
+    # Blocking findings are surfaced here too, not only by refuse_node: when a
+    # stacked question has one unanswerable part, the answer has to say which
+    # part it refused as well as answering the rest.
+    notices = [f.message for f in (result.findings if result else [])]
+    contradicted = [v.claim.raw for v in (result.claim_verdicts if result else [])
+                    if v.status == "contradicted"]
+    sources = state.get("data_sources", [])
+    coverage = result.coverage.as_dict() if result and result.coverage else None
     error = state.get("error")
 
+    def _check(text: str) -> rv.ValidationReport:
+        return rv.validate_response(
+            text, grounding,
+            intent_types=intent_types,
+            required_notices=notices,
+            expected_sources=sources,
+            contradicted_claims=contradicted,
+            coverage=coverage,
+        )
+
+    response = None
     try:
-        response = _compose_with_llm(state, context)
+        candidate = _compose_with_llm(state, _llm_context(state))
+        report = _check(_assemble(candidate, notices, sources))
+        if report.passed:
+            response = candidate
+        else:
+            # The model's wording failed a mechanical check against the real
+            # data, so it doesn't get to be the answer.
+            logger.warning("LLM response failed validation, using grounded template: %s",
+                           report.summary())
+            error = f"{error + ' | ' if error else ''}response_validation: {report.summary()}"
     except Exception as exc:
         logger.warning("LLM composition failed, using deterministic template: %s", exc)
         error = f"{error + ' | ' if error else ''}compose_llm: {exc}"
-        response = _compose_fallback(state)
 
-    if _mentions_more_stores_than_analysed(state.get("query", "")):
-        analysed = ", ".join(str(s) for s in state.get("store_ids", []))
-        response += (
-            f"\n\n> ℹ️ You asked about more stores than I analyse in one answer. "
-            f"This covers Stores {analysed} — ask again with a shorter list for the rest."
-        )
+    if response is None:
+        response = _compose_fallback(state, grounding)
 
-    sources = state.get("data_sources", [])
-    if sources and "sources" not in response.lower():
+    final = _assemble(response, notices, sources)
+
+    report = _check(final)
+    if not report.passed:
+        # The grounded path failing means a real defect, not a wording problem.
+        logger.error("final response failed validation: %s", report.summary())
+        error = f"{error + ' | ' if error else ''}final_validation: {report.summary()}"
+
+    # Last line of defence: the LLM's wording isn't fully predictable, so
+    # anything credential-shaped is stripped.
+    return {"response": guardrails.redact_output(final), "error": error, "grounding": grounding}
+
+
+def _assemble(body: str, notices: list[str], sources: list[str]) -> str:
+    """Notices first, then the answer, then citations.
+
+    Notices lead because they change how the rest should be read — a correction
+    to the user's premise, or a boundary on what was analysed, is useless
+    underneath the answer it qualifies.
+    """
+    parts = []
+    if notices:
+        parts.append("\n".join(f"> ⚠️ {n}" for n in notices))
+    parts.append(body)
+    text = "\n\n".join(p for p in parts if p)
+
+    if sources and "sources" not in text.lower():
         # One source per line, not comma-separated — pages/4_AI_Assistant.py
         # (Dikshit) splits this block on newlines to build separate citation
-        # cards via components.ui_helpers.citation_card(); a single
-        # comma-joined line would render as one garbled citation instead of
-        # clean, separate ones.
+        # cards; a single comma-joined line renders as one garbled citation.
         sources_block = "\n".join(f"- {s}" for s in sources)
-        response += f"\n\n📚 Sources:\n{sources_block}"
-
-    # Last line of defence before the text leaves the agent: the LLM's wording
-    # isn't fully predictable, so anything credential-shaped is stripped.
-    return {"response": guardrails.redact_output(response), "error": error}
-
-
-def _route_from_intent(state: AgentState) -> str:
-    intent = state.get("intent")
-    if intent == "out_of_scope":
-        return "out_of_scope"
-    if intent == "forecast":
-        return "forecast"
-    if intent in ("recommend", "whatif"):
-        # Full What-If simulation node is an S-grade / Day-3 addition (see
-        # docs/architecture.md 6.3); until then, whatif questions fall back to
-        # the Decision node, which still grounds its answer in real forecasts.
-        return "decision"
-    return "data_analyst"
+        text += f"\n\n📚 Sources:\n{sources_block}"
+    return text
 
 
 # ── Graph assembly ───────────────────────────────────────────────────────────
 
 def _route_after_guardrail(state: AgentState) -> str:
-    return "blocked" if state.get("blocked_reason") else "router"
+    return "blocked" if state.get("blocked_reason") else "understand"
+
+
+def _route_after_validation(state: AgentState) -> str:
+    result = state.get("validation")
+    return "execute" if result and result.is_answerable else "refuse"
 
 
 def build_graph():
     graph = StateGraph(AgentState)
     graph.add_node("guardrail", guardrail_node)
-    graph.add_node("router", router_node)
-    graph.add_node("data_analyst", data_analyst_node)
-    graph.add_node("forecast", forecast_node)
-    graph.add_node("decision", decision_node)
-    graph.add_node("out_of_scope", out_of_scope_node)
+    graph.add_node("understand", understand_node)
+    graph.add_node("validate", validate_node)
+    graph.add_node("execute", execute_node)
+    graph.add_node("refuse", refuse_node)
     graph.add_node("respond", respond_node)
 
     # Screening comes first, and a blocked message goes straight to END —
-    # it never reaches the router, the database, or the model.
+    # it never reaches the understanding layer, the database, or the model.
     graph.add_edge(START, "guardrail")
     graph.add_conditional_edges(
-        "guardrail",
-        _route_after_guardrail,
-        {"router": "router", "blocked": END},
+        "guardrail", _route_after_guardrail,
+        {"understand": "understand", "blocked": END},
     )
+    graph.add_edge("understand", "validate")
     graph.add_conditional_edges(
-        "router",
-        _route_from_intent,
-        {
-            "data_analyst": "data_analyst",
-            "forecast": "forecast",
-            "decision": "decision",
-            "out_of_scope": "out_of_scope",
-        },
+        "validate", _route_after_validation,
+        {"execute": "execute", "refuse": "refuse"},
     )
-    graph.add_edge("data_analyst", "respond")
-    graph.add_edge("forecast", "respond")
-    graph.add_edge("decision", "respond")
+    graph.add_edge("execute", "respond")
     # Straight to END: the refusal is already the final answer, and sending it
-    # through respond would hand an off-topic question to the LLM.
-    graph.add_edge("out_of_scope", END)
+    # through respond would hand an unanswerable question to the LLM.
+    graph.add_edge("refuse", END)
     graph.add_edge("respond", END)
 
     return graph.compile()
@@ -647,7 +1020,8 @@ def check_llm_connection() -> dict:
     from "LLM silently fell back". Returns {ok, model, detail}.
     """
     if not LLM_API_KEY:
-        return {"ok": False, "model": LLM_MODEL, "detail": "OPENROUTER_API_KEY is not set (check your .env file)"}
+        return {"ok": False, "model": LLM_MODEL,
+                "detail": "OPENROUTER_API_KEY is not set (check your .env file)"}
 
     try:
         reply = _get_llm().invoke([HumanMessage(content="Reply with the single word: ok")])

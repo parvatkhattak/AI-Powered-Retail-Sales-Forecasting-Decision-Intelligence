@@ -20,6 +20,7 @@ Architecture constraints:
 import logging
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config import USE_MOCKS
-from src.agent_graph import run_agent_stream
+from src.agent_graph import reset_session, run_agent_stream
 from components.ui_helpers import citation_card
 
 # ── Page Config ───────────────────────────────────────────────────────────────
@@ -100,6 +101,12 @@ if "pending_query" not in st.session_state:
     st.session_state["pending_query"] = ""
 if "awaiting_answer" not in st.session_state:
     st.session_state["awaiting_answer"] = ""
+if "agent_session_id" not in st.session_state:
+    # The agent keeps per-session conversation memory so a follow-up like
+    # "which one should I prioritise?" resolves to the stores just discussed.
+    # A fixed id would share that memory across every browser tab, so each
+    # Streamlit session gets its own.
+    st.session_state["agent_session_id"] = f"streamlit-{uuid4()}"
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -135,6 +142,10 @@ with st.sidebar:
         st.session_state["messages"] = []
         st.session_state["pending_query"] = ""
         st.session_state["awaiting_answer"] = ""
+        # Clear the agent's memory of this conversation too, or a follow-up
+        # after "clear" would still resolve against the cleared turns.
+        reset_session(st.session_state["agent_session_id"])
+        st.session_state["agent_session_id"] = f"streamlit-{uuid4()}"
         st.rerun()
 
     st.caption("📦 Dataset: Rossmann Store Sales")
@@ -218,7 +229,9 @@ if st.session_state.get("awaiting_answer"):
 
         try:
             with st.spinner("Analysing your stores…"):
-                for chunk in run_agent_stream(question, session_id="streamlit_session"):
+                for chunk in run_agent_stream(
+                    question, session_id=st.session_state["agent_session_id"]
+                ):
                     full_response += chunk
                     response_placeholder.markdown(full_response + "▌")
 

@@ -29,27 +29,38 @@ format it** — never invent it. Concretely:
 ## 2. Graph shape
 
 ```
-        ┌──────────┐
- START →│  Router  │  extract store IDs (regex) + classify intent
-        └────┬─────┘
-             │  (routes to exactly one branch)
-   ┌─────────┼──────────────┐
-   ▼         ▼               ▼
-DataAnalyst  Forecast      Decision
-(database.py)(model_engine.py)(decision_engine.py, which itself
-                                calls database.py + model_engine.py)
-   │         │               │
-   └─────────┴───────┬───────┘
-                      ▼
-                   Respond   (LLM formats the real data into prose,
-                              or a deterministic template if no LLM
-                              is configured)
-                      │
-                     END
+START
+  │
+  ▼
+Guardrail ──blocked──▶ END              (src/guardrails.py, refusal from code)
+  │ allowed
+  ▼
+Understand                              (src/query_understanding.py)
+  │   normalize → split into clauses → per-clause intent → entities
+  │   → resolve anaphora against this session's earlier turns
+  ▼
+Validate                                (src/validation.py)
+  │   store exists? date covered? horizon reachable? operation allowed?
+  │   premise true? → build the executable plan
+  ├──nothing answerable──▶ Refuse ──▶ END
+  │ plan has steps
+  ▼
+Execute        one step per thing the user asked, in the order asked
+  │   performance → database.py
+  │   forecast    → model_engine.py
+  │   whatif      → model_engine.get_whatif_forecast()
+  │   recommend   → decision_engine.py
+  ▼
+Respond                                 (src/response_validation.py)
+      compose (LLM or deterministic template) → run 10 checks on the
+      composed text → fall back to the grounded template if it fails
+  │
+  ▼
+ END
 ```
 
-This matches `docs/architecture.md` §6.2 — the Router dispatches to exactly
-one downstream node per question, not a linear pipeline through all four.
+Each stage narrows what the answer is allowed to say. The LLM sits at the very
+end, phrasing data that has already been fetched, bounded and checked.
 
 ### AgentState
 
@@ -57,30 +68,101 @@ one downstream node per question, not a linear pipeline through all four.
 class AgentState(TypedDict, total=False):
     query: str                    # Original user question
     session_id: str               # For conversation memory
-    intent: Intent                # "performance" | "forecast" | "recommend" | "whatif"
-    store_ids: list[int]          # Extracted store IDs from query
-    tool_results: dict            # Raw data returned by DataAnalyst/Forecast
+    intent: Intent                # Primary intent (first plan step)
+    store_ids: list[int]          # Validated store IDs from the query
+    understanding: object         # query_understanding.Understanding
+    validation: object            # validation.ValidationResult
+    steps: list[dict]             # One entry per executed plan step
+    tool_results: dict            # Merged raw data returned by tool calls
     decision_report: dict         # Structured output from decision_engine
     response: str                 # Final formatted response for the user
     data_sources: list[str]       # Citation list for UI citation cards
-    error: str | None             # Error message if something fails
+    grounding: object             # Values the answer was allowed to state
+    error: str | None             # Internal detail for logs — never shown
+    blocked_reason: str | None    # Guardrail category when refused
+    previous_stores: list[int]    # ─┐
+    previous_intents: list[str]   #  │ conversation memory, carried
+    previous_metrics: list[str]   #  │ between turns of one session
+    previous_comparison: bool     #  │
+    previous_date_range: list[str]# ─┘
 ```
 
-## 3. The Router — intent classification
+## 3. Understand — raw text to structure
 
-Two layers, so the agent works with or without an LLM configured:
+Before this layer existed the agent went straight from a string to an intent
+label, so everything the question actually said was invisible: a question
+about 2025 looked identical to one about last week, and a question about Store
+9999 looked identical to one about Store 125.
 
-1. **Store ID extraction** is always regex-based, never the LLM — a number
-   only counts as a store ID if it follows the word "store"/"stores" in the
-   question (`stores?\s*(?:id[s]?)?\s*[:#]?\s*((?:(?:\s*(?:,|and|&|/)\s*)*\d+\s*)+)`).
-   This avoids false positives like "top 10 stores" or "next 7 days", and
-   means we never hardcode a store ID anywhere in the codebase.
-2. **Intent classification** first tries the LLM with structured output
-   (`RouterOutput`, a Pydantic model constraining the answer to one of 4
-   labels). If no `OPENROUTER_API_KEY` is configured, or the call fails for
-   any reason, it falls back to a keyword classifier
-   (`_classify_intent_fallback`) — so the agent is fully testable offline
-   and never crashes for lack of a key.
+`src/query_understanding.py` is pure, deterministic, and touches nothing:
+
+1. **Normalize** — Unicode, dashes, quotes and digit grouping unified;
+   contractions and shorthand expanded ("st 125 perf" → "store 125
+   performance"); one canonical lowercase form for every matcher downstream.
+   Apostrophes are required where the bare spelling is a real word, because
+   expanding "its" to "it is" mangled "what is its forecast?".
+2. **Split into clauses** — a stacked question is several questions in one
+   string. Clauses that don't open like a question ("based on historical
+   performance and your forecast") are merged into the question they qualify.
+3. **Per-clause intent** — each clause gets its own label, so a six-part
+   question stays six parts. The "more than one store means ranking"
+   heuristic counts stores named *in that clause*, not ones inherited from
+   the rest of the sentence.
+4. **Entities** — store IDs (including out-of-range ones, so validation can
+   say the store doesn't exist rather than the number silently vanishing),
+   dates, forecast horizon, metrics, comparison, and any numeric claim the
+   user asserted.
+5. **Anaphora** — "which one should I prioritise?" resolves against
+   `previous_stores` for the session.
+
+**Store ID extraction is always regex-based, never the LLM** — a number only
+counts as a store ID if it follows the word "store"/"stores", which avoids
+false positives like "top 10 stores" or "next 7 days", and means no store ID
+is ever hardcoded in the codebase.
+
+### Dates resolve against the dataset, not the wall clock
+
+Rossmann's history ends 2015-07-31. "Yesterday" can only sensibly mean the day
+before the last day on record; resolving it against the real calendar lands a
+decade past the end of the data and makes every relative question
+unanswerable. `_reference_date()` returns the dataset's own latest date, read
+from `database.get_dataset_bounds()`.
+
+## 3b. Validate — what the data can actually support
+
+`src/validation.py` checks the structure against real coverage, read from the
+data rather than hardcoded:
+
+| Check | Question it answers | Example refusal |
+|---|---|---|
+| `check_stores` | Is this a real store here? | "Store 9999 is not present in the available dataset." |
+| `check_dates` | Is this date in history or the forecast window? | "2025-08-17 is outside what I can answer for." |
+| `check_horizon` | Can the model see that far? | "You asked about the next 30 days, the model produces 7." |
+| `check_operation` | Do we do this at all? | raw record dumps are refused, never substituted with a summary |
+| `check_reference_resolution` | Does this follow-up point at anything? | "Your question refers back to something we haven't discussed yet." |
+| `verify_claims` | Is the user's asserted number true? | "I can't verify an 83% increase. Store 125 recorded €13,146 … down 1.3%." |
+
+A **blocking** finding removes the part of the question it applies to — not
+necessarily the whole question. A stacked query that asks four answerable
+things and two unanswerable ones answers the four and states the two
+refusals; only when nothing executable is left does `refuse_node` produce the
+whole answer.
+
+The important property is that a refused question is never answered with a
+*different* question's data. That was the shape of most of the reported
+failures: the store didn't exist, or the date wasn't covered, or the
+operation wasn't supported, and the user got a fleet-wide performance summary
+that read like a confident answer.
+
+## 3c. Intent classification and the LLM
+
+Intent is decided in code, per clause. The LLM has a router prompt
+(`_classify_intent_with_llm`) and is a plain one-word completion rather than
+`with_structured_output()` — structured output needs tool/function-calling
+support, which the free OpenRouter models don't all have, and on those every
+routing call failed silently. Code has the final say either way: an LLM asked
+to pick from a fixed label set will always pick something, so scope and
+routing cannot be delegated to it.
 
 ## 4. Why `decision_engine.py` never calls an LLM
 
@@ -106,6 +188,38 @@ and `tests/test_agent_graph.py::test_curveball_consistent_top_store_across_20_ru
 
 The LLM's only involvement is in the **Respond** node, which turns the
 already-decided report into readable prose — it cannot change the ranking.
+
+### The risk level and the advice must agree
+
+A deterministic score is not enough on its own. The first version wrote the
+recommendation in a separate `if` chain from the score, and only `HIGH`
+produced real advice — so a MEDIUM store got "Store 200 is stable — no urgent
+action needed this week", and `compare_stores_report()` then quoted that
+sentence after the word "Priority:". The ranking and the recommendation
+contradicted each other in one line.
+
+Now every level maps through one table:
+
+| Risk level | Urgency | `action_required` | Shape of the advice |
+|---|---|---|---|
+| HIGH | `act_now` | True | "Act this week on Store N: …" |
+| MEDIUM | `monitor` | True | "Watch Store N this week — \<the driver\>. Nothing needs emergency action yet." |
+| LOW | `none` | False | "No action needed for Store N — no weakening signals." |
+
+`_risk_drivers()` names which signal pushed the score up, so the advice cites a
+reason rather than asserting a level. The comparison summary is phrased from
+the top store's own urgency: it only says "Priority:" when that store's risk
+level says action is due.
+
+`check_report_consistency()` is the invariant, exported rather than left in the
+tests because the agent runs it on its own output too
+(`_run_recommend` logs an error if a report ever fails it):
+
+- risk level and urgency must map to each other
+- a store needing action must not carry "no action needed" wording
+- a LOW-risk store must not carry priority wording
+- the ranking must be ordered by risk score
+- the summary must not name a priority while saying nothing needs doing
 
 ## 5. Hallucination prevention
 
@@ -225,18 +339,46 @@ Two failure modes are handled explicitly, both covered by tests:
   > print(check_llm_connection())   # {"ok": True/False, "model": ..., "detail": ...}
   > ```
   > If `ok` is False, the response text you're seeing is the template, not the LLM.
+- **A real store with no forecast** — 259 of the 1,115 stores aren't in the
+  forecast calendar the model's window is built from. That is a coverage fact
+  about the store, so the answer says which it is
+  (`_explain_missing_forecast`) and offers the store's real trading average
+  and promo history, rather than reporting "no data available" or implying the
+  simulation was run.
 - **`USE_MOCKS=False` but `retail.db` / model files don't exist yet**
   (e.g. before Himanshu/Ashutosh's pipelines have been run locally) →
   `run_agent()` / `run_agent_stream()` catch the exception and return a
   `⚠️` prefixed friendly message instead of crashing the Streamlit app,
   per `docs/architecture.md` §13 ("Agent Error Handling").
 
+## 6b. Response validation — checking the text, not trusting it
+
+`src/response_validation.py` runs ten checks on the composed answer before it
+leaves. A system prompt asking the model not to invent numbers is a request;
+this is the check.
+
+| Check | What it catches |
+|---|---|
+| `not_empty` | an answer that isn't one |
+| `no_internal_leakage` | tracebacks, SQL, file paths, credential shapes |
+| `numeric_grounding` | any currency amount or percentage with no source in the tool results |
+| `store_grounding` | a store ID the answer names but never looked up |
+| `date_grounding` | a date stated as if data existed for it |
+| `required_notices` | a validation finding the user has to see, missing from the text |
+| `no_self_contradiction` | one store called both a priority and stable |
+| `covers_all_intents` | a stacked question answered with only one of its parts |
+| `has_sources` | citations dropped |
+| `premise_corrected` | a claim the data contradicts, repeated as fact |
+
+The deterministic composer passes `numeric_grounding` **by construction**:
+`_money()`, `_pct()` and `_count()` register each figure with the `Grounding`
+object as they format it, so it can only print numbers it was given. The LLM
+gets no such registration — it only ever sees the context dict — so any figure
+it invents is ungrounded and the check catches it. When the LLM's answer fails
+any check, the grounded template is used instead and the failure is logged.
+
 ## 7. What's intentionally out of scope here
 
-- **What-If Node** — `docs/architecture.md` marks this "(S-Grade)". Until
-  it exists as its own node, a `whatif`-classified question is routed to
-  the Decision node, which still grounds its answer in a real forecast
-  (`_route_from_intent` in `agent_graph.py`).
 - **Real token-by-token LLM streaming** — `run_agent_stream()` currently
   streams the already-composed response word-by-word rather than
   streaming LLM tokens live. Swapping in the LLM's own async streaming
@@ -248,11 +390,16 @@ Two failure modes are handled explicitly, both covered by tests:
 | File | Checks |
 |---|---|
 | `tests/test_decision_engine.py` | Required fields present, risk level valid, citations non-empty, ranking sorted correctly, ranking deterministic across 20 runs, unknown store degrades gracefully, quoted numbers trace back to real computed values |
-| `tests/test_agent_graph.py` | Store ID extraction, intent classification (incl. the curveball question), no crashes across all 4 intents, citations present, multiple stores mentioned in a comparison, top pick stable across 20 runs, streaming output matches non-streaming, missing-DB failure is friendly not fatal, graph compiles |
+| `tests/test_agent_graph.py` | Store ID extraction, intent classification (incl. the curveball question), no crashes across all 4 intents, citations present, multiple stores mentioned in a comparison, top pick stable across 20 runs, streaming output matches non-streaming, missing-DB failure is friendly not fatal, fleet questions route to different reports, graph compiles |
+| `tests/test_guardrails.py` | 30 adversarial prompts blocked and categorised, 10 legitimate ones allowed, blocked prompts never reach the database, nonsense input doesn't crash or leak, different questions give different answers |
+| `tests/test_query_understanding.py` | Normalization, clause splitting, qualifier merging, store-ID extraction (incl. out-of-range), absolute and relative date parsing, dataset-relative "yesterday", horizon extraction, premise extraction, per-clause intent, context resolution |
+| `tests/test_agent_behaviour.py` | The ten reported failures, end to end: unknown store, date outside coverage, forecast horizon, false premise, what-if routing (and three paraphrases), conversational follow-up, six-part multi-intent, raw-data refusal (and three paraphrases), numeric grounding across six question shapes, decision consistency |
 
 Run with:
 ```bash
-pytest tests/test_agent_graph.py tests/test_decision_engine.py -v
+pytest tests/test_agent_graph.py tests/test_decision_engine.py \
+       tests/test_guardrails.py tests/test_query_understanding.py \
+       tests/test_agent_behaviour.py -v
 ```
 Both files run fully offline (no `OPENROUTER_API_KEY` required) since they
 exercise the deterministic fallback paths described in section 6.
