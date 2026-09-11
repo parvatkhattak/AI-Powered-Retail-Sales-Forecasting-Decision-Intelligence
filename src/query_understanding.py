@@ -239,6 +239,62 @@ def extract_store_candidates(query: str) -> list[int]:
     return ids
 
 
+# A bare number is only a store ID inside a frame that can only be about a
+# store. Matching any number in range would turn "sales of 300 units" and
+# "over 500 customers" into store lookups, so the frame does the work and the
+# ID range only confirms it.
+_BARE_STORE_FRAMES = (
+    re.compile(r"\bhow(?:\s+is|\s+are|\s+was)?\s+#?(\d{1,4})\b(?=[^.?!]*\b(?:perform\w*|doing|going|look\w*|track\w*|sell\w*|fare|faring)\b)", re.IGNORECASE),
+    re.compile(r"\b(?:what|how)\s+about\s+#?(\d{1,4})\b", re.IGNORECASE),
+    re.compile(r"\b(?:tell me about|info(?:rmation)? on|details? on|check|look at|show me|update on|status of)\s+#?(\d{1,4})\b", re.IGNORECASE),
+    re.compile(r"\b(?:compare|versus|vs\.?)\s+#?(\d{1,4})\s+(?:and|with|to|vs\.?|versus)\s+#?(\d{1,4})\b", re.IGNORECASE),
+    re.compile(r"^#?(\d{1,4})\s*\??$"),
+)
+
+# A number followed by any of these is counting something, not naming a store.
+_UNIT_AFTER_RE = re.compile(
+    r"^\s*(?:units?|items?|products?|pieces|customers?|visitors?|transactions?|sales|euros?|dollars?"
+    r"|pounds?|rupees?|days?|weeks?|months?|years?|stores?|shops?|outlets?|percent|%|rows?|records?"
+    r"|orders?|people)\b",
+    re.IGNORECASE,
+)
+# A number preceded by any of these is a rank, a count or a quantity.
+_QUANTIFIER_BEFORE_RE = re.compile(
+    r"\b(?:top|bottom|best|worst|first|last|next|past|previous|over|under|above|below|about|around"
+    r"|approximately|roughly|more than|less than|at least|at most|[€$£₹])\s*$",
+    re.IGNORECASE,
+)
+
+
+def extract_bare_store_candidates(query: str, low: int = 1, high: int = 1115) -> list[int]:
+    """Store IDs named without the word "store" — "how is 300 performing?".
+
+    Three independent conditions all have to hold: the number sits in a frame
+    that can only be referring to a store, it isn't preceded by a quantifier or
+    followed by a unit noun, and it falls inside the real store-ID range. The
+    frame is what keeps "sales of 300 units" from becoming Store 300.
+    """
+    text = _unify_dashes(query)
+    found: list[int] = []
+    for frame in _BARE_STORE_FRAMES:
+        for match in frame.finditer(text):
+            for group in range(1, (match.lastindex or 1) + 1):
+                raw = match.group(group)
+                if raw is None:
+                    continue
+                # Checked against what precedes the whole frame, not the
+                # number: "tell me about 300" ends in "about", which is itself
+                # on the quantifier list and would otherwise veto its own frame.
+                if _QUANTIFIER_BEFORE_RE.search(text[:match.start()]):
+                    continue
+                if _UNIT_AFTER_RE.match(text[match.end(group):]):
+                    continue
+                value = int(raw)
+                if low <= value <= high and value not in found:
+                    found.append(value)
+    return found
+
+
 def mentions_more_stores_than(query: str, cap: int = MAX_STORES_PER_QUERY) -> bool:
     """True when the query asked about more stores than the cap allows."""
     mentioned: set[int] = set()
@@ -459,6 +515,8 @@ _COMPARISON_RE = re.compile(
 # turn made the agent demand context it didn't need.
 _CONTEXT_REFERENCE_RE = re.compile(
     r"\bwhich one\b|\bwhich of (?:them|those|these|the two|the ones)\b"
+    r"|\bwhich should i\b|\bwhich (?:needs?|requires?|deserves?)\b"
+    r"|\bwhich is (?:worse|better|riskier|weaker|stronger|more|less)\b"
     r"|\bthat store\b|\bthis store\b|\bthose stores?\b|\bthese stores?\b"
     r"|\bthe (?:two|three|both)\b|\bboth of them\b|\b(?:of|between|among) them\b"
     r"|\b(?:compare|rank|prioriti[sz]e|focus on)\s+(?:them|those|these)\b"
@@ -613,10 +671,24 @@ def is_in_scope(query: str, store_candidates: list[int]) -> bool:
 # list happened to contain. "if a promotion were active" is the exact query
 # that used to fall through to the forecast node and answer "no forecast".
 _HYPOTHETICAL_RE = re.compile(
-    r"\bwhat if\b|\bwhat would happen\b|\bwhat-if\b|\bsimulat\w*\b|\bscenario\b"
-    r"|\bhypothetical\w*\b|\bsuppose\b|\bassuming\b|\bimagine\b"
-    r"|\bif (?:we|they|you|i|a|an|the)\b.{0,40}?\b(?:run|ran|add(?:ed)?|remov(?:e|ed)|turn(?:ed)?|switch(?:ed)?|activat\w*|enabl\w*|disabl\w*|were|was|is|are|had|have)\b"
+    r"\bwhat if\b|\bwhat would happen\b|\bwhat happens\b|\bwhat-if\b|\bsimulat\w*\b"
+    r"|\bscenario\b|\bhypothetical\w*\b|\bsuppose\b|\bassuming\b|\bimagine\b"
+    # The subject after "if" is any short noun phrase, not a fixed pronoun list:
+    # "if a promotion were active" was matched, "if Store 125 runs a promotion"
+    # was not, and both are the same question.
+    r"|\bif\s+(?:\w+\s+){0,3}?(?:runs?|ran|add(?:s|ed)?|remov(?:e|es|ed)|turn(?:s|ed)?"
+    r"|switch(?:es|ed)?|activat\w*|enabl\w*|disabl\w*|start(?:s|ed)?|were|was|is|are|had|have|has)\b"
     r"|\bwere (?:active|running|on|enabled|in place)\b|\bwould (?:sales|revenue|the forecast|it)\b",
+    re.IGNORECASE,
+)
+
+# "Compare it with no promotion" is the second half of a what-if, not a request
+# to rank stores. Both halves have to be present: a comparison *and* an explicit
+# promo-on/promo-off contrast, so "how is Store 125 doing with promotions?"
+# stays an ordinary performance question.
+_SCENARIO_CONTRAST_RE = re.compile(
+    r"\b(?:with|without)\s+(?:a\s+|the\s+|any\s+|no\s+)?promo\w*\b"
+    r"|\bno\s+promo\w*\b|\bpromo\w*\s+(?:on|off)\b",
     re.IGNORECASE,
 )
 _PROMO_SUBJECT_RE = re.compile(r"\bpromo\w*\b|\bdiscount\w*\b|\bdeal\b|\boffer\b", re.IGNORECASE)
@@ -628,6 +700,14 @@ _FORECAST_RE = re.compile(
 _RECOMMEND_RE = re.compile(
     r"\bfocus\b|\brecommend\w*\b|\bpriorit\w*\b|\bshould i\b|\bwhich (?:store|one)\b"
     r"|\bneeds? attention\b|\bwhat should\b|\bwhere should\b|\badvice\b|\baction\b",
+    re.IGNORECASE,
+)
+# Risk language is checked before forecast language: "which 5 stores are most
+# at risk of underperforming next week" mentions the horizon, but it is asking
+# for the risk ranking the decision engine already computes, not a forecast.
+_RISK_RE = re.compile(
+    r"\bat risk\b|\brisk of\b|\brisk(?:iest)?\b|\bunderperform\w*\b|\bin trouble\b"
+    r"|\bstruggl\w*\b|\bdeclin\w*\b|\bworr\w*\b|\bneed\w*\s+attention\b|\bmost vulnerable\b",
     re.IGNORECASE,
 )
 
@@ -642,12 +722,16 @@ def classify_clause(clause: str, store_candidates: list[int], stores_named_here:
         return "out_of_scope"
     if _HYPOTHETICAL_RE.search(clause) and (_PROMO_SUBJECT_RE.search(clause) or _FORECAST_RE.search(clause)):
         return "whatif"
+    if _SCENARIO_CONTRAST_RE.search(clause) and _COMPARISON_RE.search(clause):
+        return "whatif"
     # Checked before forecast keywords: "which of these should I focus on next
     # week" mentions the horizon but is asking for a ranking, not a forecast.
     # Counted from this clause alone: "and what is the promo uplift?" inherits
     # the two stores named earlier in the question, but it is not itself a
     # request to rank them.
     named_here = len(store_candidates) if stores_named_here is None else stores_named_here
+    if _RISK_RE.search(clause) and _RANKING_RE.search(clause) or _RISK_RE.search(clause) and not store_candidates:
+        return "recommend"
     if _RECOMMEND_RE.search(clause) or _COMPARISON_RE.search(clause) or named_here > 1:
         return "recommend"
     if _FORECAST_RE.search(clause):
@@ -711,7 +795,13 @@ class Understanding:
         return len(self.intents) > 1
 
 
-def understand(query: str, reference_date: date, context: dict | None = None) -> Understanding:
+def is_fleet_risk_request(clause: str) -> bool:
+    """A risk question with no store named — "which stores are most at risk?"."""
+    return bool(_RISK_RE.search(clause))
+
+
+def understand(query: str, reference_date: date, context: dict | None = None,
+               store_id_range: tuple[int, int] = (1, 1115)) -> Understanding:
     """Raw text -> structure, with earlier turns filled in where the question
     leans on them.
 
@@ -726,6 +816,10 @@ def understand(query: str, reference_date: date, context: dict | None = None) ->
     clauses = split_clauses(normalized)
 
     store_candidates = extract_store_candidates(normalized)
+    if not store_candidates:
+        # Only consulted when no store was named explicitly, so the explicit
+        # form always wins and this can never override it.
+        store_candidates = extract_bare_store_candidates(normalized, *store_id_range)
     references_context = bool(
         not store_candidates and _CONTEXT_REFERENCE_RE.search(normalized)
     )
@@ -753,7 +847,8 @@ def understand(query: str, reference_date: date, context: dict | None = None) ->
 
     intents: list[IntentSpec] = []
     for clause in clauses:
-        named_here = extract_store_candidates(clause)
+        named_here = extract_store_candidates(clause) or extract_bare_store_candidates(
+            clause, *store_id_range)
         clause_stores = named_here or store_candidates
         intent_type = classify_clause(clause, clause_stores, stores_named_here=len(named_here))
         # A clause can only be out of scope if the whole query is: "and why?"

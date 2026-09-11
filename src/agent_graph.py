@@ -74,6 +74,8 @@ class AgentState(TypedDict, total=False):
     grounding: object             # response_validation.Grounding used to check the answer
     error: str | None             # Internal detail for logs — never shown to the user
     blocked_reason: str | None    # Guardrail category when a message was refused
+    safe_query: str | None        # The answerable part of a partly-refused message
+    guardrail_notice: str | None  # Refusal that must be shown alongside the answer
     # Conversation memory, carried between turns of one session.
     previous_stores: list[int]
     previous_intents: list[str]
@@ -215,17 +217,31 @@ def guardrail_node(state: AgentState) -> dict:
     database, or the model — the refusal is produced entirely from code.
     """
     verdict = guardrails.screen_input(state.get("query", ""))
+    if verdict.blocked and verdict.safe_remainder:
+        # Mixed message: the refused part is refused and said so, and the
+        # legitimate question is still answered from approved aggregates.
+        # Refusing the whole thing was safe but cost the user the half they
+        # were entitled to.
+        logger.info("guardrail refused part of a message (category=%s), answering the rest",
+                    verdict.category)
+        return {"blocked_reason": None, "safe_query": verdict.safe_remainder,
+                "guardrail_notice": verdict.reply}
     if verdict.blocked:
         logger.info("guardrail blocked a message (category=%s)", verdict.category)
         return {"blocked_reason": verdict.category, "response": verdict.reply, "data_sources": []}
-    return {"blocked_reason": None}
+    return {"blocked_reason": None, "safe_query": None, "guardrail_notice": None}
 
 
 def understand_node(state: AgentState) -> dict:
     """Raw text -> structure, with this session's earlier turns available."""
-    query = state["query"]
+    # The answerable remainder when part of the message was refused, otherwise
+    # the message itself.
+    query = state.get("safe_query") or state["query"]
     context = get_session_context(state.get("session_id", "default"))
-    understanding = qu.understand(query, _reference_date(), context)
+    coverage = dv.get_coverage()
+    store_range = ((min(coverage.store_ids), max(coverage.store_ids))
+                   if coverage.store_ids else (_MIN_STORE_ID, _MAX_STORE_ID))
+    understanding = qu.understand(query, _reference_date(), context, store_id_range=store_range)
 
     return {
         "understanding": understanding,
@@ -290,23 +306,52 @@ def _run_performance(step) -> dict:
 
 
 def _run_forecast(step) -> dict:
-    """Tools: get_7day_forecast, get_shap_explanations, get_baseline_comparison."""
-    tool_results: dict = {"forecast": {}, "shap": {}, "baseline_comparison": {}, "no_forecast": {}}
+    """Tools: get_7day_forecast, get_shap_explanations (model_engine.py).
+
+    Deliberately does *not* call get_baseline_comparison(): it loads a second
+    model from disk and runs two more recursive forecasts (~0.4s per store),
+    and the chat answer never quotes it — the baseline-vs-model chart lives on
+    the Forecasting page, which calls it directly. It was pure latency here.
+    """
+    tool_results: dict = {"forecast": {}, "shap": {}, "no_forecast": {}}
     sources: list[str] = []
+
+    tool_results["calendar"] = {}
 
     for sid in step.stores:
         forecast = model_engine.get_7day_forecast(sid)
         if forecast is None or forecast.empty:
             tool_results["no_forecast"][sid] = _explain_missing_forecast(sid)
             continue
+        tool_results["calendar"][sid] = _forecast_calendar(sid)
         tool_results["forecast"][sid] = forecast.to_dict(orient="records")
         tool_results["shap"][sid] = model_engine.get_shap_explanations(sid)
-        tool_results["baseline_comparison"][sid] = model_engine.get_baseline_comparison(sid).to_dict(
-            orient="records")
-        sources = ["model_engine.get_7day_forecast", "model_engine.get_shap_explanations",
-                   "model_engine.get_baseline_comparison"]
+        sources = ["model_engine.get_7day_forecast", "model_engine.get_shap_explanations"]
 
     return {"tool_results": tool_results, "sources": sources}
+
+
+def _forecast_calendar(store_id: int) -> list[dict]:
+    """Open/Promo/holiday flags for the forecast window, as known in advance.
+
+    Needed because a closed day forecasts as exactly 0 — correctly, a shut shop
+    sells nothing — and without the calendar the answer had no way to tell that
+    apart from a predicted collapse. It was being read as underperformance.
+    """
+    try:
+        calendar = model_engine.get_forecast_calendar(store_id)
+    except Exception as exc:
+        logger.warning("forecast calendar unavailable for store %s: %s", store_id, exc)
+        return []
+    if calendar is None or calendar.empty:
+        return []
+    return [
+        {"date": str(row["Date"])[:10], "open": int(row["Open"]),
+         "promo": int(row["Promo"]),
+         "state_holiday": str(row["StateHoliday"]),
+         "school_holiday": int(row["SchoolHoliday"])}
+        for _, row in calendar.iterrows()
+    ]
 
 
 def _explain_missing_forecast(store_id: int) -> dict:
@@ -327,6 +372,13 @@ def _explain_missing_forecast(store_id: int) -> dict:
         detail["recent_avg_sales"] = round(float(info["recent_avg"]), 2)
         detail["window_start"] = str(info["dates"][0])[:10]
         detail["window_end"] = str(info["dates"][-1])[:10]
+
+    try:
+        coverage = model_engine.get_forecast_coverage()
+        detail["stores_with_forecast"] = coverage.get("stores_with_forecast")
+        detail["total_stores"] = dv.get_coverage().total_stores or None
+    except Exception as exc:
+        logger.warning("forecast coverage unavailable: %s", exc)
     return detail
 
 
@@ -356,28 +408,74 @@ def _run_whatif(step) -> dict:
                 logger.warning("promo history unavailable for store %s: %s", sid, exc)
             continue
 
-        with_avg = float(with_promo["PredictedSales"].mean())
-        without_avg = float(without_promo["PredictedSales"].mean())
+        # Closed days forecast as 0 in both scenarios and would drag both daily
+        # averages down by the same ~1/7, making the promotion look weaker than
+        # it is and reading as predicted collapse rather than a shut shop.
+        # The scenario is compared across trading days only.
+        open_with = with_promo[with_promo["PredictedSales"] > 0]
+        open_without = without_promo[without_promo["PredictedSales"] > 0]
+        trading_days = max(len(open_with), len(open_without))
+        closed_days = int(len(with_promo) - trading_days)
+
+        with_avg = float(open_with["PredictedSales"].mean()) if not open_with.empty else 0.0
+        without_avg = float(open_without["PredictedSales"].mean()) if not open_without.empty else 0.0
+        with_total = float(with_promo["PredictedSales"].sum())
+        without_total = float(without_promo["PredictedSales"].sum())
+
         tool_results["whatif"][sid] = {
             "scenario": "promotion active on every open day of the forecast window",
             "with_promo_avg": round(with_avg, 2),
             "without_promo_avg": round(without_avg, 2),
             "difference": round(with_avg - without_avg, 2),
             "difference_pct": round((with_avg - without_avg) / without_avg * 100, 2) if without_avg else 0.0,
-            "with_promo_total": round(float(with_promo["PredictedSales"].sum()), 2),
-            "without_promo_total": round(float(without_promo["PredictedSales"].sum()), 2),
+            "with_promo_total": round(with_total, 2),
+            "without_promo_total": round(without_total, 2),
+            "total_difference": round(with_total - without_total, 2),
             "days": len(with_promo),
+            "trading_days": trading_days,
+            "closed_days": closed_days,
+            "window_start": str(with_promo["Date"].iloc[0])[:10],
+            "window_end": str(with_promo["Date"].iloc[-1])[:10],
             "with_promo_daily": with_promo.to_dict(orient="records"),
             "without_promo_daily": without_promo.to_dict(orient="records"),
         }
         sources.append("model_engine.get_whatif_forecast")
+        # Fetched for covered stores too, so the interpretation can say whether
+        # the modelled effect is bigger or smaller than what promotions have
+        # actually achieved at this store before.
+        try:
+            tool_results.setdefault("promo_history", {})[sid] = database.get_promo_history(sid)
+            sources.append("database.get_promo_history")
+        except Exception as exc:
+            logger.warning("promo history unavailable for store %s: %s", sid, exc)
 
     return {"tool_results": tool_results, "sources": sorted(set(sources))}
+
+
+# A fleet-wide risk question shows this many stores unless it asks for another
+# number, and screens this many candidates before scoring them.
+_FLEET_RISK_DEFAULT_N = 5
+_FLEET_RISK_MAX_N = 10
 
 
 def _run_recommend(step) -> dict:
     """Calls decision_engine.py, which internally fetches from both database.py
     and model_engine.py."""
+    if not step.stores and qu.is_fleet_risk_request(step.clause):
+        # "Which stores are most at risk?" names no store, and used to fall
+        # through to "no specific store was identified" even though the risk
+        # methodology and the fleet data to run it on both already existed.
+        requested = qu.parse_fleet_request(step.clause).get("n") or _FLEET_RISK_DEFAULT_N
+        top_n = max(1, min(int(requested), _FLEET_RISK_MAX_N))
+        report = decision_engine.rank_fleet_risk(top_n=top_n)
+        sources = sorted({s for r in report["ranked_stores"] for s in r["data_sources"]}
+                         | {"database.get_fleet_trend_screen"})
+        violations = decision_engine.check_report_consistency(report)
+        if violations:
+            logger.error("fleet risk report failed its consistency check: %s", violations)
+        return {"tool_results": {"decision_report": report}, "sources": sources,
+                "decision_report": report, "consistency_violations": violations}
+
     if len(step.stores) > 1:
         report = decision_engine.compare_stores_report(step.stores)
         sources = sorted({s for r in report["ranked_stores"] for s in r["data_sources"]})
@@ -480,6 +578,8 @@ def refuse_node(state: AgentState) -> dict:
 
     parts = [f.message for f in findings]
     extra = [f.message for f in (result.notices if result else [])]
+    if state.get("guardrail_notice"):
+        parts.insert(0, state["guardrail_notice"])
     body = "\n\n".join(parts + extra)
 
     # Say what *can* be asked, so a refusal is still useful.
@@ -678,20 +778,33 @@ def _forecast_section(step: dict, grounding: rv.Grounding) -> str:
     tool_results = step["tool_results"]
     lines: list[str] = []
 
+    calendars = tool_results.get("calendar") or {}
     for sid, rows in (tool_results.get("forecast") or {}).items():
         if not rows:
             continue
         grounding.add_store(sid)
-        values = [r["PredictedSales"] for r in rows]
-        average = sum(values) / len(values)
         for row in rows:
             grounding.add_date(str(row.get("Date")))
+        closed = _closed_days(rows, calendars.get(sid))
+        trading = [r["PredictedSales"] for r in rows
+                   if str(r.get("Date"))[:10] not in closed]
+        if not trading:
+            trading = [r["PredictedSales"] for r in rows]
+
         first_date, last_date = str(rows[0].get("Date"))[:10], str(rows[-1].get("Date"))[:10]
         lines.append(
-            f"**Store {sid}: {_money(average, grounding)}/day forecast** for the "
-            f"{_count(len(rows), grounding)} days from {first_date} to {last_date} "
-            f"({_money(sum(values), grounding)} in total)."
+            f"**Store {sid}: {_money(sum(trading) / len(trading), grounding)}/day forecast** across "
+            f"its {_count(len(trading), grounding)} trading days, "
+            f"{first_date} to {last_date} ({_money(sum(trading), grounding)} in total)."
         )
+        if closed:
+            listed = ", ".join(sorted(closed))
+            lines.append(
+                f"- {listed} {'are' if len(closed) > 1 else 'is'} a scheduled **closed day** for "
+                f"this store, so the model forecasts €0 for "
+                f"{'them' if len(closed) > 1 else 'it'}. That is a shut shop, not weak trading, "
+                f"and it is excluded from the daily average above."
+            )
 
     for sid, detail in (tool_results.get("no_forecast") or {}).items():
         grounding.add_store(sid)
@@ -709,6 +822,19 @@ def _forecast_section(step: dict, grounding: rv.Grounding) -> str:
     return "\n\n".join(lines)
 
 
+def _closed_days(forecast_rows: list[dict], calendar: list[dict] | None) -> set[str]:
+    """Dates in the forecast window on which this store is scheduled to be shut.
+
+    Taken from the store's own forecast calendar where available. A zero
+    prediction is only treated as a closed day when the calendar says the store
+    is closed — a genuine zero prediction on an open day would be a real signal
+    and must not be silently reclassified.
+    """
+    if calendar:
+        return {day["date"] for day in calendar if not day.get("open")}
+    return set()
+
+
 def _whatif_section(step: dict, grounding: rv.Grounding) -> str:
     tool_results = step["tool_results"]
     lines: list[str] = []
@@ -716,32 +842,55 @@ def _whatif_section(step: dict, grounding: rv.Grounding) -> str:
     for sid, sim in (tool_results.get("whatif") or {}).items():
         grounding.add_store(sid)
         sign = "+" if sim["difference"] >= 0 else "-"
+        window = f"{sim['window_start']} to {sim['window_end']}" if sim.get("window_start") else "next week"
+        grounding.add_date(sim.get("window_start"))
+        grounding.add_date(sim.get("window_end"))
+
+        closed_note = ""
+        if sim.get("closed_days"):
+            closed_note = (
+                f" ({_count(sim['closed_days'], grounding)} scheduled closed day"
+                f"{'s' if sim['closed_days'] != 1 else ''} excluded — a shut store forecasts €0, "
+                f"which is not weak trading)"
+            )
+
         lines.append(
-            f"**Store {sid} — promotion running every open day next week**\n\n"
-            f"- Without a promotion: **{_money(sim['without_promo_avg'], grounding)}/day** "
-            f"({_money(sim['without_promo_total'], grounding)} over "
-            f"{_count(sim['days'], grounding)} days)\n"
-            f"- With the promotion active: **{_money(sim['with_promo_avg'], grounding)}/day** "
-            f"({_money(sim['with_promo_total'], grounding)} over the same window)\n"
-            f"- Difference: **{sign}{_money(abs(sim['difference']), grounding)}/day "
-            f"({sign}{_pct(abs(sim['difference_pct']), grounding)})**"
+            f"**Store {sid} — what if a promotion ran every open day, {window}?**\n\n"
+            f"**Baseline (promotion off)** — {_money(sim['without_promo_avg'], grounding)}/day "
+            f"across {_count(sim['trading_days'], grounding)} trading days, "
+            f"{_money(sim['without_promo_total'], grounding)} over the window{closed_note}\n\n"
+            f"**Promotion on** — {_money(sim['with_promo_avg'], grounding)}/day, "
+            f"{_money(sim['with_promo_total'], grounding)} over the same window\n\n"
+            f"**Difference** — **{sign}{_money(abs(sim['difference']), grounding)}/day, "
+            f"{sign}{_pct(abs(sim['difference_pct']), grounding)}** "
+            f"({sign}{_money(abs(sim['total_difference']), grounding)} across the window)\n\n"
+            f"**Interpretation** — {_whatif_interpretation(sid, sim, tool_results, grounding)}"
         )
 
     for sid, detail in (tool_results.get("no_forecast") or {}).items():
         grounding.add_store(sid)
+        covered = detail.get("stores_with_forecast")
+        total = detail.get("total_stores")
+        scope = (f" The model's forecast window covers "
+                 f"{_count(covered, grounding)} of the {_count(total, grounding)} stores in this "
+                 f"dataset; Store {sid} is one of the "
+                 f"{_count(total - covered, grounding)} it does not.") if covered and total else ""
         note = (
-            f"**I can't simulate a promotion for Store {sid}.** The scenario needs a "
-            f"forecast to vary, and Store {sid} isn't in the forecast calendar the "
-            f"model's window is built from — so there's nothing to run the "
-            f"with-promo/without-promo comparison against, and I won't invent one."
+            f"**I can't simulate a promotion for Store {sid} — data not available.** The "
+            f"scenario works by re-running the forecast with the promotion flag flipped, so it "
+            f"needs a forecast to vary. Store {sid} has no forecast in this window, so there is "
+            f"nothing to compare against and I won't manufacture one by applying its historical "
+            f"uplift to a number the model never produced.{scope}"
         )
         promo = (tool_results.get("promo_history") or {}).get(sid)
         if promo and promo.get("uplift_pct"):
             note += (
-                f"\n\nWhat the store's own history does show: promotions have lifted "
-                f"Store {sid} by **{_pct(promo['uplift_pct'], grounding)}** on average — "
-                f"{_money(promo.get('promo_avg_sales', 0), grounding)}/day on promo days "
-                f"versus {_money(promo.get('non_promo_avg_sales', 0), grounding)}/day without."
+                f"\n\nSeparately — and this is history, not a simulation — promotions have "
+                f"lifted Store {sid} by **{_pct(promo['uplift_pct'], grounding)}** on average "
+                f"across its recorded past: {_money(promo.get('promo_avg_sales', 0), grounding)}/day "
+                f"on promo days versus {_money(promo.get('non_promo_avg_sales', 0), grounding)}/day "
+                f"without. That is what the store has done before, not what the model predicts it "
+                f"would do next week."
             )
         if detail.get("recent_avg_sales"):
             note += f" Its recent trading average is {_money(detail['recent_avg_sales'], grounding)}/day."
@@ -750,12 +899,63 @@ def _whatif_section(step: dict, grounding: rv.Grounding) -> str:
     return "\n\n".join(lines)
 
 
+def _whatif_interpretation(store_id: int, sim: dict, tool_results: dict,
+                           grounding: rv.Grounding) -> str:
+    """Whether the scenario looks worthwhile, from the modelled numbers alone.
+
+    Kept strictly to what this dataset contains. Rossmann has no promotion
+    cost, margin or stock data, so "worthwhile" can only ever be a statement
+    about incremental revenue — saying anything about profit would be inventing
+    the half of the calculation nobody gave us.
+    """
+    total_gain = sim["total_difference"]
+    pct = sim["difference_pct"]
+    promo = (tool_results.get("promo_history") or {}).get(store_id) or {}
+    historical = promo.get("uplift_pct")
+
+    if pct <= 0:
+        verdict = (
+            f"the model expects **no gain** from running the promotion in this particular week "
+            f"— it forecasts {_money(abs(total_gain), grounding)} "
+            f"{'less' if total_gain < 0 else 'no more'} revenue across the window."
+        )
+    else:
+        verdict = (
+            f"the model expects the promotion to add "
+            f"**{_money(total_gain, grounding)}** across the window "
+            f"({_pct(pct, grounding)} more revenue)."
+        )
+
+    context = ""
+    if historical:
+        gap = "below" if pct < historical else "above"
+        context = (
+            f" For context, this store's *historical* promo uplift is "
+            f"{_pct(historical, grounding)}, so the modelled effect is {gap} what promotions have "
+            f"achieved here in the past — the model is accounting for this specific week's "
+            f"conditions, not repeating the long-run average."
+        )
+
+    caveat = (
+        " Whether that is worth doing depends on the promotion's cost and margin, which this "
+        "dataset does not contain — so this is an expected-revenue figure, not a profit one."
+    )
+    return verdict + context + caveat
+
+
 def _recommend_section(step: dict, grounding: rv.Grounding) -> str:
     report = step["tool_results"].get("decision_report") or {}
 
     if report.get("ranked_stores"):
-        stores = ", ".join(str(s) for s in step["stores"])
-        lines = [f"**Priority ranking for stores {stores}:**\n"]
+        if step["stores"]:
+            header = f"**Priority ranking for stores {', '.join(str(s) for s in step['stores'])}:**"
+        else:
+            # Fleet-wide: say how the shortlist was reached, so a relative
+            # ranking is never mistaken for an absolute alarm.
+            count = len(report["ranked_stores"])
+            grounding.add_number(count)
+            header = f"**The {count} stores most at risk across the fleet:**"
+        lines = [header + "\n"]
         for i, r in enumerate(report["ranked_stores"], start=1):
             grounding.add_store(r["store_id"])
             grounding.add_number(r["risk_score"])
@@ -769,6 +969,10 @@ def _recommend_section(step: dict, grounding: rv.Grounding) -> str:
                 f"   - ✅ Recommendation: {r['recommendation']}"
             )
         lines.append(f"\n**Summary:** {report['summary']}")
+        if report.get("methodology"):
+            grounding.add_number(report.get("screened_stores"))
+            grounding.add_number(report.get("fleet_size"))
+            lines.append(f"\n*How this was ranked:* {report['methodology']}")
         return "\n".join(lines)
 
     if "observation" in report:
@@ -809,7 +1013,10 @@ _METRIC_TITLES = {
 
 
 def _section_title(step: dict) -> str:
-    if len(step.get("metrics") or []) == 1:
+    # Only for performance steps: a forecast or what-if section that happens to
+    # mention promotions is still a forecast, and titling both "Promotional
+    # uplift" produced two identically-headed sections saying different things.
+    if step["intent"] == "performance" and len(step.get("metrics") or []) == 1:
         specific = _METRIC_TITLES.get(step["metrics"][0])
         if specific:
             return specific
@@ -923,6 +1130,10 @@ def _llm_payload(step: dict) -> dict:
         report = tool_results.get("decision_report") or {}
         return {
             "summary": report.get("summary"),
+            "methodology": report.get("methodology"),
+            "screened_stores": report.get("screened_stores"),
+            "fleet_size": report.get("fleet_size"),
+            "stores_without_forecast": report.get("stores_without_forecast"),
             "ranked_stores": [
                 {k: v for k, v in entry.items() if k != "data_sources"}
                 for entry in report.get("ranked_stores", [])
@@ -999,6 +1210,10 @@ def respond_node(state: AgentState) -> dict:
     # stacked question has one unanswerable part, the answer has to say which
     # part it refused as well as answering the rest.
     notices = [f.message for f in (result.findings if result else [])]
+    if state.get("guardrail_notice"):
+        # Part of the message was refused. The refusal leads, then the part
+        # that could legitimately be answered follows.
+        notices.insert(0, state["guardrail_notice"])
     contradicted = [v.claim.raw for v in (result.claim_verdicts if result else [])
                     if v.status == "contradicted"]
     sources = state.get("data_sources", [])

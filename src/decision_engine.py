@@ -115,21 +115,38 @@ def _recommendation(store_id: int, risk_level: str, drivers: list[str],
     return f"No action needed for Store {store_id} — no weakening signals in the current window."
 
 
-def generate_decision_report(store_id: int) -> dict:
-    """Returns full Observation/Prediction/Evidence/Recommendation for a store."""
+def generate_decision_report(store_id: int, with_explanations: bool = True) -> dict:
+    """Returns full Observation/Prediction/Evidence/Recommendation for a store.
+
+    `with_explanations=False` skips the SHAP call, which is the single most
+    expensive part of a report (~0.5s per store) and feeds only the Evidence
+    prose — `_risk_score` never looks at it. Fleet-wide screening uses that to
+    score a shortlist cheaply, then re-runs the handful it actually shows with
+    explanations on. The score is identical either way.
+    """
     metrics = database.get_store_metrics([store_id], days=30)
     promo = database.get_promo_history(store_id)
     forecast = model_engine.get_7day_forecast(store_id)
-    shap = model_engine.get_shap_explanations(store_id)
+    shap = model_engine.get_shap_explanations(store_id) if with_explanations else {}
 
     sources = ["database.get_store_metrics", "database.get_promo_history"]
 
     trend_pct = _trend_pct(metrics)
     avg_sales = round(float(metrics["sales"].mean()), 2) if not metrics.empty else 0.0
 
+    # A closed day forecasts as 0, correctly — the store sells nothing when it
+    # is shut. But data_pipeline.py drops Open == 0 rows, so `avg_sales` above
+    # is a *trading-day* average with no zeros in it. Averaging the forecast
+    # across all 7 calendar days compared a week containing a closed Sunday
+    # against a history containing none, which pushed roughly one day in seven
+    # (~14%) of phantom weakness into every store's forecast delta and from
+    # there straight into its risk score. Both sides are trading days now.
+    closed_days = 0
     if not forecast.empty:
         sources.append("model_engine.get_7day_forecast")
-        forecast_avg = round(float(forecast["PredictedSales"].mean()), 2)
+        open_days = forecast[forecast["PredictedSales"] > 0]
+        closed_days = int(len(forecast) - len(open_days))
+        forecast_avg = round(float(open_days["PredictedSales"].mean()), 2) if not open_days.empty else 0.0
         forecast_vs_avg_pct = round((forecast_avg - avg_sales) / avg_sales * 100, 2) if avg_sales else 0.0
     else:
         forecast_avg, forecast_vs_avg_pct = 0.0, 0.0
@@ -157,9 +174,15 @@ def generate_decision_report(store_id: int) -> dict:
         prediction = f"No forecast available for Store {store_id}."
     else:
         sign = "+" if forecast_vs_avg_pct >= 0 else ""
+        closed_note = (
+            f" ({closed_days} closed day{'s' if closed_days != 1 else ''} in the window "
+            f"excluded — a shut store forecasts zero, which is not underperformance)"
+            if closed_days else ""
+        )
         prediction = (
-            f"The model forecasts Store {store_id} will average €{forecast_avg:,.0f}/day next week "
-            f"({sign}{forecast_vs_avg_pct}% vs its own 30-day average)."
+            f"The model forecasts Store {store_id} will average €{forecast_avg:,.0f}/day across its "
+            f"trading days next week ({sign}{forecast_vs_avg_pct}% vs its own 30-day trading "
+            f"average){closed_note}."
         )
 
     uplift_pct = promo.get("uplift_pct", 0)
@@ -189,6 +212,9 @@ def generate_decision_report(store_id: int) -> dict:
         "risk_drivers": drivers,
         "trend_pct": trend_pct,
         "forecast_avg_sales": forecast_avg,
+        "forecast_vs_avg_pct": forecast_vs_avg_pct,
+        "forecast_closed_days": closed_days,
+        "forecast_available": not forecast.empty,
         "data_sources": sources,
     }
 
@@ -298,3 +324,91 @@ def check_report_consistency(report: dict) -> list[str]:
             violations.append("summary both names a priority and says no action is needed")
 
     return violations
+
+
+# ── Fleet-wide risk ranking ──────────────────────────────────────────────────
+
+# Screening the whole fleet with the full methodology means one forecast per
+# store — 1,115 of them, minutes of work. A cheap SQL trend pass narrows the
+# field first, and the real methodology scores only the shortlist.
+DEFAULT_SCREEN_SIZE = 12
+
+
+def rank_fleet_risk(top_n: int = 5, screen_size: int = DEFAULT_SCREEN_SIZE) -> dict:
+    """The stores most at risk across the whole fleet, using this project's own
+    risk methodology rather than a new one.
+
+    Two stages, both honest about what they are:
+
+    1. **Screen** — `database.get_fleet_trend_screen()` ranks all 1,115 stores
+       by recent sales trend in one SQL pass and returns the weakest
+       `screen_size`. This is a shortlist, not a risk score: a store is a
+       *candidate* because its sales are falling, not because it is "worse
+       than another store".
+    2. **Score** — every candidate goes through `generate_decision_report()`,
+       the same trend + forecast-weakness + unused-promo score used everywhere
+       else, and the ranking is by that score.
+
+    A store whose forecast is unavailable is kept and flagged rather than
+    dropped or given an invented number: its score is computed from the signals
+    that *are* available, and the report says so.
+    """
+    screen = database.get_fleet_trend_screen(limit=max(top_n, screen_size))
+    if screen is None or screen.empty:
+        return {"ranked_stores": [], "summary": "No store has enough sales history to rank on risk.",
+                "screened_stores": 0, "scored_stores": 0, "stores_without_forecast": [],
+                "methodology": "no data"}
+
+    candidates = [int(s) for s in screen["Store"].tolist()]
+    # Score the shortlist without SHAP, then re-run only the stores that will
+    # actually be shown with their explanations. Same score, a third of the work.
+    scored = [generate_decision_report(sid, with_explanations=False) for sid in candidates]
+    shortlist = sorted(scored, key=lambda r: r["risk_score"], reverse=True)[:top_n]
+    ranked = [generate_decision_report(r["store_id"]) for r in shortlist]
+    ranked.sort(key=lambda r: r["risk_score"], reverse=True)
+
+    without_forecast = [r["store_id"] for r in ranked if not r.get("forecast_available")]
+
+    total_stores = 0
+    try:
+        total_stores = int(database.get_dataset_bounds().get("total_stores") or 0)
+    except Exception:  # pragma: no cover - bounds are advisory here
+        total_stores = 0
+
+    return {
+        "ranked_stores": ranked,
+        "summary": _fleet_risk_summary(ranked, without_forecast),
+        "screened_stores": len(candidates),
+        "scored_stores": len(scored),
+        "fleet_size": total_stores,
+        "stores_without_forecast": without_forecast,
+        "methodology": (
+            f"All {total_stores or 'available'} stores were ranked by recent sales trend in one "
+            f"pass; the weakest {len(candidates)} were then scored with the standard risk "
+            f"methodology (sales trend, forecast weakness vs the store's own average, and days "
+            f"since the last promotion)."
+        ),
+    }
+
+
+def _fleet_risk_summary(ranked: list[dict], without_forecast: list[int]) -> str:
+    if not ranked:
+        return "No store met the threshold for a risk ranking."
+
+    top = ranked[0]
+    if top["urgency"] == "act_now":
+        lead = f"Store {top['store_id']} is the most at-risk store ({top['risk_level']}, score {top['risk_score']})."
+    elif top["urgency"] == "monitor":
+        lead = (f"Store {top['store_id']} leads the risk ranking ({top['risk_level']}, score "
+                f"{top['risk_score']}) and is the one to watch, but nothing here needs emergency action.")
+    else:
+        lead = (f"These are the fleet's weakest stores *relative to each other* — but none of them "
+                f"is above LOW risk on the absolute scale, so nothing here needs action this week. "
+                f"Store {top['store_id']} ranks first (score {top['risk_score']}).")
+
+    if without_forecast:
+        listed = ", ".join(f"Store {s}" for s in without_forecast)
+        lead += (f" {listed} {'have' if len(without_forecast) > 1 else 'has'} no forecast in this "
+                 f"window, so {'their' if len(without_forecast) > 1 else 'its'} score uses sales "
+                 f"trend and promo signals only — no forecast figure was estimated.")
+    return lead

@@ -239,6 +239,25 @@ def _promo_timing(dates: pd.Series, promo: pd.Series):
 _MONTH_ABBR = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sept",10:"Oct",11:"Nov",12:"Dec"}
 
 
+_REFERENCE_CSVS: dict = {}
+
+
+def _read_reference_csv(name: str) -> pd.DataFrame:
+    """test.csv / store.csv, read once per process instead of once per call.
+
+    Both are static inputs, and _forecast_context() runs for every forecast and
+    every SHAP call — so a five-store decision report was re-parsing the same
+    1.4MB test.csv ten times. Callers copy before mutating (see `future`).
+    """
+    if name not in _REFERENCE_CSVS:
+        if name == "test":
+            _REFERENCE_CSVS[name] = pd.read_csv(Path(DB_PATH).parent / "test.csv",
+                                                parse_dates=["Date"])
+        else:
+            _REFERENCE_CSVS[name] = pd.read_csv(STORE_CSV)
+    return _REFERENCE_CSVS[name]
+
+
 def _forecast_context(store_id: int, promo_override: int | None = None):
     """Everything needed to build feature rows for this store's forecast window —
     shared by get_7day_forecast(), get_shap_explanations(), get_baseline_comparison()
@@ -258,8 +277,8 @@ def _forecast_context(store_id: int, promo_override: int | None = None):
     if hist.empty or last_row.empty:
         return None  # unknown store
 
-    test_df = pd.read_csv(Path(DB_PATH).parent / "test.csv", parse_dates=["Date"])
-    future = test_df[test_df["Store"] == store_id].sort_values("Date").reset_index(drop=True)
+    test_df = _read_reference_csv("test")
+    future = test_df[test_df["Store"] == store_id].sort_values("Date").reset_index(drop=True).copy()
     future["Open"] = future["Open"].fillna(1).astype(int)  # test.csv leaves Open blank only for a handful of always-open stores
     if promo_override is not None:
         future.loc[future["Open"] == 1, "Promo"] = promo_override
@@ -279,7 +298,7 @@ def _forecast_context(store_id: int, promo_override: int | None = None):
     static["Assortment"] = ASSORTMENT_MAP[last_row.iloc[0]["Assortment"]]
 
     # IsPromo2Active for future dates: recompute from raw store.csv (Sales-independent).
-    store_raw = pd.read_csv(STORE_CSV)
+    store_raw = _read_reference_csv("store")
     srow = store_raw[store_raw["Store"] == store_id].iloc[0]
     if srow["Promo2"] == 1 and pd.notna(srow["Promo2SinceYear"]):
         promo2_start = pd.Timestamp.fromisocalendar(int(srow["Promo2SinceYear"]), int(srow["Promo2SinceWeek"]), 1)
@@ -572,3 +591,45 @@ def get_model_metrics() -> dict:
 if __name__ == "__main__":
     if "--train" in sys.argv:
         train_model()
+
+
+_FORECAST_COVERAGE = None
+
+
+def get_forecast_coverage() -> dict:
+    """Which stores the forecast window can actually cover, and over what dates.
+
+    The forecast window is built from test.csv, which contains 856 of the
+    dataset's 1,115 stores. The other 259 are real stores with real history and
+    no forecast — a coverage fact, not a failure. Exposed so the assistant can
+    say exactly that instead of "no data available", and cached because it is
+    a fixed property of the artifacts.
+
+    Returns: {stores_with_forecast, window_start, window_end, forecast_days}
+    """
+    global _FORECAST_COVERAGE
+    if _FORECAST_COVERAGE is not None:
+        return _FORECAST_COVERAGE
+
+    if USE_MOCKS:
+        _FORECAST_COVERAGE = {
+            "stores_with_forecast": 856,
+            "window_start": "2015-08-01",
+            "window_end": "2015-08-07",
+            "forecast_days": FORECAST_DAYS,
+        }
+        return _FORECAST_COVERAGE
+
+    try:
+        test_df = pd.read_csv(Path(DB_PATH).parent / "test.csv", parse_dates=["Date"])
+        window = sorted(test_df["Date"].unique())[:FORECAST_DAYS]
+        _FORECAST_COVERAGE = {
+            "stores_with_forecast": int(test_df["Store"].nunique()),
+            "window_start": str(window[0])[:10],
+            "window_end": str(window[-1])[:10],
+            "forecast_days": FORECAST_DAYS,
+        }
+    except Exception:
+        _FORECAST_COVERAGE = {"stores_with_forecast": None, "window_start": None,
+                              "window_end": None, "forecast_days": FORECAST_DAYS}
+    return _FORECAST_COVERAGE

@@ -523,3 +523,73 @@ def get_dataset_bounds() -> dict:
         "total_stores": int(row["total_stores"]),
         "store_ids": [int(s) for s in stores["Store"].tolist()],
     }
+
+def get_fleet_trend_screen(limit: int = 15, window_days: int = 30,
+                           min_days: int = 10) -> pd.DataFrame:
+    """Stores with the weakest recent sales trend, cheapest-first screening.
+
+    Added for fleet-wide risk questions ("which stores are most at risk?").
+    Scoring all 1,115 stores with the full risk methodology means 1,115
+    forecasts, which is minutes of work — so this narrows the field in one SQL
+    pass over the whole fleet, and the caller runs the real risk methodology on
+    the shortlist only.
+
+    Compares each store's average daily sales over the last `window_days`
+    trading days against the `window_days` before that, worst trend first.
+    Every row is a real store with real history: nothing here estimates.
+
+    Returns columns: Store, recent_avg_sales, prior_avg_sales, trend_pct, recent_days.
+    """
+    if USE_MOCKS:
+        rows = [
+            {"Store": 200, "recent_avg_sales": 6800.0, "prior_avg_sales": 7900.0,
+             "trend_pct": -13.92, "recent_days": 26},
+            {"Store": 300, "recent_avg_sales": 7100.0, "prior_avg_sales": 7500.0,
+             "trend_pct": -5.33, "recent_days": 26},
+            {"Store": 100, "recent_avg_sales": 8300.0, "prior_avg_sales": 8400.0,
+             "trend_pct": -1.19, "recent_days": 26},
+            {"Store": 400, "recent_avg_sales": 8400.0, "prior_avg_sales": 8300.0,
+             "trend_pct": 1.20, "recent_days": 26},
+            {"Store": 500, "recent_avg_sales": 6400.0, "prior_avg_sales": 6300.0,
+             "trend_pct": 1.59, "recent_days": 26},
+        ]
+        return pd.DataFrame(rows).head(limit).reset_index(drop=True)
+
+    limit = max(1, min(int(limit), 50))
+
+    engine = _get_engine()
+    query = text("""
+        WITH bounds AS (SELECT MAX(Date) AS last_date FROM sales),
+        recent AS (
+            SELECT Store, AVG(Sales) AS recent_avg_sales, COUNT(*) AS recent_days
+            FROM sales, bounds
+            WHERE Date > date(bounds.last_date, '-' || :window || ' days')
+            GROUP BY Store
+        ),
+        prior AS (
+            SELECT Store, AVG(Sales) AS prior_avg_sales, COUNT(*) AS prior_days
+            FROM sales, bounds
+            WHERE Date > date(bounds.last_date, '-' || :double_window || ' days')
+              AND Date <= date(bounds.last_date, '-' || :window || ' days')
+            GROUP BY Store
+        )
+        SELECT r.Store,
+               ROUND(r.recent_avg_sales, 2) AS recent_avg_sales,
+               ROUND(p.prior_avg_sales, 2)  AS prior_avg_sales,
+               ROUND((r.recent_avg_sales - p.prior_avg_sales) / p.prior_avg_sales * 100, 2) AS trend_pct,
+               r.recent_days
+        FROM recent r
+        JOIN prior p ON p.Store = r.Store
+        WHERE p.prior_avg_sales > 0
+          AND r.recent_days >= :min_days
+          AND p.prior_days   >= :min_days
+        ORDER BY trend_pct ASC
+        LIMIT :limit
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params={
+            "window": window_days, "double_window": window_days * 2,
+            "min_days": min_days, "limit": limit,
+        })
+    return df
