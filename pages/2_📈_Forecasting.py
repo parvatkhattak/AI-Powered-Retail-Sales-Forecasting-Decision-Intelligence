@@ -582,27 +582,7 @@ elif st.session_state.stage == "explaining":
 
     st.markdown("<div style='text-align:center; margin-top:1.5rem; font-size:1.5rem;'>Would you like to explore more stores?</div>",
                 unsafe_allow_html=True)
-
-    # ── CSV Export ──────────────────────────────────────────────────────────
-    export_df = forecast.rename(columns={
-        "Date": "date",
-        "PredictedSales": "predicted_sales",
-        "LowerBound": "lower_bound",
-        "UpperBound": "upper_bound",
-    })
-    export_df["store_id"] = store_id
-    csv_bytes = export_df[["store_id", "date", "predicted_sales", "lower_bound", "upper_bound"]].to_csv(index=False).encode()
-    st.download_button(
-        label="⬇️ Download Forecast as CSV",
-        data=csv_bytes,
-        file_name=f"store_{store_id}_7day_forecast.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-    st.markdown("<hr style='margin: 1.5rem 0; opacity: 0.2;'>", unsafe_allow_html=True)
-
     _, c1, c2, _ = st.columns([2, 1, 1, 2])
-
     with c1:
         if st.button("Yes, explore another", use_container_width=True):
             st.session_state.stage = "greeting"

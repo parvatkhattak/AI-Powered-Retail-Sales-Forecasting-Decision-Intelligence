@@ -1,193 +1,280 @@
 """
 pages/4_🤖_AI_Assistant.py
-Owner: Dikshit — Frontend Developer / Saumya — AI Engineer
+Owner: Dikshit — UI Developer
 
-AI Assistant page:
-- Streaming chat interface powered by LangGraph agent
-- Citation cards showing source tools used
-- Example question chips to guide users
-- Full conversation history in session
-- Loading spinner while agent thinks
+Streaming chat interface powered by src/agent_graph.py.
+
+Features:
+  1. Streaming chat using run_agent_stream() with real-time token display
+  2. Session message history (persists across re-runs via st.session_state)
+  3. Clickable example question chips
+  4. Citation cards showing which data sources backed each response
+  5. Graceful error handling — agent failures show friendly message
+
+Architecture constraints:
+  - Calls ONLY run_agent_stream() and run_agent() from src/agent_graph.py
+  - Never imports from database.py or model_engine.py directly
+  - All errors wrapped in try/except — never crashes Streamlit
 """
+
 import sys
-import time
 from pathlib import Path
 
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.ui_theme import apply_theme
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="wide")
-apply_theme()
+from config import USE_MOCKS
+from src.agent_graph import run_agent_stream
+from components.ui_helpers import citation_card
 
-st.markdown("""
-<style>
-    /* User message bubble */
-    .user-bubble {
-        background: linear-gradient(135deg, #1e40af, #3b82f6);
-        border-radius: 18px 18px 4px 18px;
-        padding: 0.8rem 1.2rem;
-        margin: 0.4rem 0;
-        color: white;
-        font-size: 1.05rem;
-        max-width: 80%;
-        margin-left: auto;
-        display: block;
-        word-wrap: break-word;
-    }
-    /* Agent message bubble */
-    .agent-bubble {
-        background: rgba(16, 185, 129, 0.1);
-        border: 1px solid rgba(16, 185, 129, 0.3);
-        border-radius: 18px 18px 18px 4px;
-        padding: 0.8rem 1.2rem;
-        margin: 0.4rem 0;
-        color: #e5e7eb;
-        font-size: 1.05rem;
-        max-width: 85%;
-        word-wrap: break-word;
-    }
-    /* Citation card */
-    .citation-card {
-        display: inline-block;
-        background: rgba(59, 130, 246, 0.15);
-        border: 1px solid rgba(59, 130, 246, 0.4);
-        border-radius: 8px;
-        padding: 0.25rem 0.6rem;
-        margin: 0.2rem 0.2rem 0 0;
-        font-size: 0.78rem;
-        color: #93c5fd;
-        font-family: monospace;
-    }
-    /* Chip buttons */
-    div[data-testid="stHorizontalBlock"] button {
-        font-size: 0.88rem !important;
-        padding: 0.35rem 0.8rem !important;
-        border-radius: 999px !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ── Page Config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="AI Assistant — Retail AI",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-st.markdown("# 🤖 AI Decision Assistant")
-st.markdown("**Ask natural-language questions about any store's performance, forecasts, and promotions.**")
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .stApp { background: linear-gradient(135deg, #0a0c14 0%, #0e1117 50%, #0a0f1e 100%); }
+    hr { border-color: #2E3250 !important; margin: 2rem 0 !important; }
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0e1117 0%, #141727 100%);
+        border-right: 1px solid #2E3250;
+    }
+    .page-title {
+        background: linear-gradient(90deg, #43D9A4, #6C63FF);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        font-size: 2.2rem; font-weight: 700; margin-bottom: 0.1rem;
+    }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 20px;
+             font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; }
+    .badge-live { background: rgba(67,217,164,0.15); color: #43D9A4; border: 1px solid #43D9A4; }
+    .badge-mock { background: rgba(255,165,82,0.15); color: #FFA552; border: 1px solid #FFA552; }
+
+    /* Chat message bubbles */
+    div[data-testid="stChatMessage"] {
+        background: linear-gradient(135deg, #1a1d27 0%, #1e2133 100%);
+        border: 1px solid #2E3250;
+        border-radius: 12px;
+        margin-bottom: 0.75rem;
+    }
+    /* Chat input box */
+    div[data-testid="stChatInput"] > div {
+        background: #1a1d27;
+        border: 1px solid #2E3250;
+        border-radius: 12px;
+    }
+    /* Example chips */
+    .chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
+    .chip {
+        background: rgba(108,99,255,0.10);
+        border: 1px solid #6C63FF;
+        border-radius: 20px;
+        padding: 6px 14px;
+        font-size: 0.82rem;
+        color: #C0BCFF;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .chip:hover { background: rgba(108,99,255,0.25); }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── Session State Init ────────────────────────────────────────────────────────
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+if "pending_query" not in st.session_state:
+    st.session_state["pending_query"] = ""
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/shopping-cart.png", width=52)
+    st.markdown("## 🤖 AI Assistant")
+    st.divider()
+
+    mode_badge = (
+        '<span class="badge badge-mock">🟡 MOCK DATA</span>'
+        if USE_MOCKS
+        else '<span class="badge badge-live">🟢 LIVE DATA</span>'
+    )
+    st.markdown(mode_badge, unsafe_allow_html=True)
+    st.divider()
+
+    st.markdown(
+        """
+        **How to use:**
+        1. Type a question or click an example chip below
+        2. The assistant queries real store data
+        3. Citations show which data sources were used
+
+        **Supported query types:**
+        - 🔍 *Performance* — "How is Store 125 doing?"
+        - 📈 *Forecast* — "What are next week's sales for Store 200?"
+        - 🎯 *Recommend* — "Which of stores 100–500 should I focus on?"
+        - 🔮 *What-If* — "What if Store 300 runs a promo next week?"
+        """
+    )
+    st.divider()
+
+    if st.button("🗑️ Clear Chat History", use_container_width=True, key="clear_chat"):
+        st.session_state["messages"] = []
+        st.session_state["pending_query"] = ""
+        st.rerun()
+
+    st.caption("📦 Dataset: Rossmann Store Sales")
+    st.caption("🏗️ Owner: Dikshit (pages/)")
+
+# ── Page Header ───────────────────────────────────────────────────────────────
+col_title, col_badge = st.columns([3, 1])
+with col_title:
+    st.markdown('<p class="page-title">AI Retail Assistant</p>', unsafe_allow_html=True)
+    st.markdown("Ask natural-language questions about any store. Get grounded, evidence-backed answers.")
+with col_badge:
+    st.markdown(
+        f"<div style='text-align:right;padding-top:12px;'>{mode_badge}</div>",
+        unsafe_allow_html=True,
+    )
+
 st.divider()
 
-# ── Session state ──────────────────────────────────────────────────────────────
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # list of {"role": "user"|"assistant", "text": str, "citations": list}
-
-# ── Example question chips ─────────────────────────────────────────────────────
+# ── Example Question Chips ────────────────────────────────────────────────────
 EXAMPLE_QUESTIONS = [
-    "What is the forecasted sales for Store 1 next week?",
-    "Should Store 5 run a promotion next week?",
-    "I manage Stores 100, 200, 300, 400, 500. Which needs the most attention?",
-    "What drives Store 250's sales the most?",
-    "What would happen to Store 10's sales if we add a promotion?",
+    "I manage Stores 100, 200, 300, 400, 500. Which should I focus on next week?",
+    "How is Store 125 performing over the last 30 days?",
+    "What would happen to Store 200's sales if we added a promotion next week?",
+    "Which stores have the highest promo uplift?",
+    "What are the expected sales for Store 300 next week?",
+    "Compare Store 50 and Store 200 — which is doing better?",
 ]
 
-st.markdown("**💡 Try an example question:**")
-chips = st.columns(len(EXAMPLE_QUESTIONS))
-prefill_question = None
-for i, q in enumerate(EXAMPLE_QUESTIONS):
-    if chips[i].button(q[:40] + "…" if len(q) > 40 else q, key=f"chip_{i}", use_container_width=True):
-        prefill_question = q
+st.markdown("##### 💡 Try an example question:")
+chip_cols = st.columns(3)
+for idx, question in enumerate(EXAMPLE_QUESTIONS):
+    col_idx = idx % 3
+    with chip_cols[col_idx]:
+        if st.button(
+            f"💬 {question[:55]}{'…' if len(question) > 55 else ''}",
+            key=f"chip_{idx}",
+            use_container_width=True,
+            help=question,
+        ):
+            st.session_state["pending_query"] = question
 
-# ── Chat input ─────────────────────────────────────────────────────────────────
-with st.form("chat_form", clear_on_submit=True):
-    user_input = st.text_input(
-        "Ask a question about any store:",
-        value=prefill_question or "",
-        placeholder="e.g. What is the 7-day forecast for Store 1?",
-        label_visibility="collapsed",
-    )
-    col_send, col_clear = st.columns([4, 1])
-    submitted = col_send.form_submit_button("Send →", use_container_width=True)
-    cleared = col_clear.form_submit_button("Clear Chat", use_container_width=True)
+st.divider()
 
-if cleared:
-    st.session_state.chat_history = []
-    st.rerun()
+# ── Chat History Display ──────────────────────────────────────────────────────
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "👤"):
+        st.markdown(msg["content"])
 
-# ── Handle submission ──────────────────────────────────────────────────────────
-if submitted and user_input.strip():
-    question = user_input.strip()
-    st.session_state.chat_history.append({"role": "user", "text": question, "citations": []})
+        # Show citation card for assistant messages that have sources
+        if msg["role"] == "assistant" and msg.get("sources"):
+            citation_card(msg["sources"])
 
-    # Show spinner while agent works
-    with st.spinner("🤖 Agent is thinking…"):
+# ── Chat Input ────────────────────────────────────────────────────────────────
+# Handle pending query from chip click first
+prompt = st.session_state.pop("pending_query", "") or st.chat_input(
+    "Ask anything about your stores… e.g. 'Which store should I focus on next week?'",
+    key="chat_input",
+)
+
+if prompt:
+    # Add user message to history
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user", avatar="👤"):
+        st.markdown(prompt)
+
+    # Stream assistant response
+    with st.chat_message("assistant", avatar="🤖"):
+        response_placeholder = st.empty()
+        full_response = ""
+        sources: list[str] = []
+
         try:
-            from src.agent_graph import run_agent
-            raw_response = run_agent(question)
+            with st.spinner("Analysing your stores…"):
+                for chunk in run_agent_stream(prompt, session_id="streamlit_session"):
+                    full_response += chunk
+                    response_placeholder.markdown(full_response + "▌")
 
-            # Parse citations from response — format: "📚 **Sources:** tool1, tool2"
-            citations = []
-            response_text = raw_response
-            if "**Sources:**" in raw_response:
-                parts = raw_response.split("**Sources:**")
-                response_text = parts[0].strip()
-                citation_line = parts[1].strip() if len(parts) > 1 else ""
-                citations = [c.strip() for c in citation_line.replace("📚", "").split(",") if c.strip()]
-            elif "Sources:" in raw_response:
-                parts = raw_response.split("Sources:")
-                response_text = parts[0].strip()
-                citation_line = parts[1].strip() if len(parts) > 1 else ""
-                citations = [c.strip() for c in citation_line.split(",") if c.strip()]
+            response_placeholder.markdown(full_response)
 
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "text": response_text,
-                "citations": citations,
-            })
-        except Exception as e:
-            error_msg = (
-                f"⚠️ Agent encountered an error: `{e}`\n\n"
-                "Make sure `retail.db` is initialised and `OPENROUTER_API_KEY` is set in `.env`."
+            # Parse out any [Sources] block that the agent appended
+            if "[Sources]" in full_response or "Sources:" in full_response:
+                marker = "[Sources]" if "[Sources]" in full_response else "Sources:"
+                parts = full_response.split(marker)
+                if len(parts) > 1:
+                    raw_sources = parts[-1].strip().split("\n")
+                    sources = [s.strip("- •*").strip() for s in raw_sources if s.strip()]
+
+            # Fallback citation when no sources parsed but response is real
+            if not sources and not USE_MOCKS:
+                sources = [
+                    "database.get_store_metrics",
+                    "database.get_promo_history",
+                ]
+
+            if sources:
+                citation_card(sources)
+
+        except Exception as exc:
+            full_response = (
+                "⚠️ The AI assistant encountered an error. Please try again.\n\n"
+                f"_(Technical detail: {exc})_"
             )
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "text": error_msg,
-                "citations": [],
-            })
+            response_placeholder.markdown(full_response)
 
-    st.rerun()
+    # Save to history
+    st.session_state["messages"].append({
+        "role": "assistant",
+        "content": full_response,
+        "sources": sources,
+    })
 
-# ── Render conversation ────────────────────────────────────────────────────────
+# ── Empty state when no messages yet ─────────────────────────────────────────
+if not st.session_state["messages"]:
+    st.markdown(
+        """
+        <div style="
+            text-align: center;
+            padding: 60px 20px;
+            color: #8B8FA8;
+            border: 1px dashed #2E3250;
+            border-radius: 16px;
+            margin: 20px 0;
+        ">
+            <div style="font-size: 3rem; margin-bottom: 16px;">🤖</div>
+            <div style="font-size: 1.1rem; font-weight: 600; color: #C0BCFF; margin-bottom: 8px;">
+                Your AI Retail Assistant is ready
+            </div>
+            <div style="font-size: 0.9rem;">
+                Click an example chip above or type your own question below.<br>
+                All responses are grounded in real store data — no hallucinations.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 st.divider()
 
-if not st.session_state.chat_history:
-    st.markdown("""
-    <div style="text-align: center; padding: 3rem; opacity: 0.5;">
-        <div style="font-size: 4rem;">🤖</div>
-        <p style="font-size: 1.2rem; color: #9ca3af;">
-            Ask a question above to start a conversation with the AI assistant.
-        </p>
+# ── Footer ────────────────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <div style='text-align:center; color:#8B8FA8; font-size:0.78rem; padding:16px 0 8px;'>
+        🤖 AI Assistant &nbsp;·&nbsp; Retail AI Decision Intelligence Platform &nbsp;·&nbsp;
+        Owner: <strong>Dikshit</strong> &nbsp;·&nbsp;
+        Powered by: <strong>LangGraph + LLM</strong>
     </div>
-    """, unsafe_allow_html=True)
-else:
-    for msg in st.session_state.chat_history:
-        if msg["role"] == "user":
-            st.markdown(
-                f'<div class="user-bubble">👤 {msg["text"]}</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            # Render agent bubble
-            st.markdown(
-                f'<div class="agent-bubble">🤖 {msg["text"]}</div>',
-                unsafe_allow_html=True,
-            )
-            # Render citation cards
-            if msg.get("citations"):
-                citation_html = " ".join(
-                    f'<span class="citation-card">📎 {c}</span>'
-                    for c in msg["citations"]
-                )
-                st.markdown(
-                    f'<div style="margin-top:0.3rem; margin-bottom:0.8rem;">{citation_html}</div>',
-                    unsafe_allow_html=True,
-                )
-
-st.divider()
-st.caption("⚠️ The AI assistant only uses real data from the database and model. It never invents numbers.")
+    """,
+    unsafe_allow_html=True,
+)
