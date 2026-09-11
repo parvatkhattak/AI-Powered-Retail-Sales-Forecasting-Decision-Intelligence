@@ -240,13 +240,14 @@ if st.session_state.get("awaiting_answer"):
             # goes.
             answer: dict = {}
             stages: Queue = Queue()
+            drafts: Queue = Queue()
             # Read on the main thread: st.session_state has no session context
             # inside a worker, and touching it there warns or raises.
             agent_session_id = st.session_state["agent_session_id"]
 
             def _run() -> None:
                 try:
-                    with progress_reporting(stages.put):
+                    with progress_reporting(stages.put, on_draft=drafts.put):
                         answer["text"] = run_agent(question, session_id=agent_session_id)
                 except Exception as exc:  # surfaced on the main thread below
                     answer["error"] = exc
@@ -255,14 +256,25 @@ if st.session_state.get("awaiting_answer"):
             started = time.perf_counter()
             worker.start()
 
-            stage = "Starting"
+            stage, draft = "Starting", ""
             while worker.is_alive():
                 try:
                     stage = stages.get(timeout=0.1)
                 except Empty:
                     pass
+                if not draft:
+                    try:
+                        draft = drafts.get_nowait()
+                    except Empty:
+                        pass
+                    else:
+                        # The grounded answer, on screen in well under a second.
+                        # The model is still writing; what replaces this is the
+                        # same facts in better prose.
+                        response_placeholder.markdown(draft)
                 status_placeholder.caption(
-                    f"⏳ {stage}… **{time.perf_counter() - started:.1f}s**"
+                    f"{'✨ Refining' if draft else '⏳ ' + stage}… "
+                    f"**{time.perf_counter() - started:.1f}s**"
                 )
             worker.join()
             elapsed = time.perf_counter() - started
@@ -275,11 +287,12 @@ if st.session_state.get("awaiting_answer"):
             # Typed out rather than dumped, so a long answer starts reading
             # immediately. The text is already complete and already validated
             # at this point — nothing unchecked is ever on screen.
-            shown = ""
-            for i, word in enumerate(full_response.split(" ")):
-                shown += word + " "
-                if i % 6 == 0:
-                    response_placeholder.markdown(shown + "▌")
+            if not draft:
+                shown = ""
+                for i, word in enumerate(full_response.split(" ")):
+                    shown += word + " "
+                    if i % 6 == 0:
+                        response_placeholder.markdown(shown + "▌")
             response_placeholder.markdown(full_response)
             status_placeholder.caption(f"✅ Answered in **{elapsed:.1f}s**")
 

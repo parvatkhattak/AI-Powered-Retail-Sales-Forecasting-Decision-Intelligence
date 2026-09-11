@@ -61,14 +61,25 @@ _progress = threading.local()
 
 
 @contextmanager
-def progress_reporting(callback):
-    """Route this thread's progress messages to `callback` for the duration."""
+def progress_reporting(callback, on_draft=None):
+    """Route this thread's progress messages to `callback` for the duration.
+
+    `on_draft` additionally receives the grounded answer the moment it exists,
+    before the LLM is asked to rephrase it. The deterministic composition costs
+    milliseconds once the tools have run, while the model takes seconds — so
+    the user can be reading a correct, fully validated answer while the nicer
+    wording is still being written. Every version shown is grounded; the
+    upgrade only changes the prose.
+    """
     previous = getattr(_progress, "callback", None)
+    previous_draft = getattr(_progress, "draft_callback", None)
     _progress.callback = callback
+    _progress.draft_callback = on_draft
     try:
         yield
     finally:
         _progress.callback = previous
+        _progress.draft_callback = previous_draft
 
 
 def _emit(stage: str) -> None:
@@ -79,6 +90,16 @@ def _emit(stage: str) -> None:
         callback(stage)
     except Exception:  # a broken listener must never break the answer
         logger.debug("progress listener raised", exc_info=True)
+
+
+def _emit_draft(text: str) -> None:
+    callback = getattr(_progress, "draft_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(text)
+    except Exception:
+        logger.debug("draft listener raised", exc_info=True)
 
 Intent = Literal["performance", "forecast", "recommend", "whatif", "out_of_scope"]
 
@@ -1276,6 +1297,12 @@ def respond_node(state: AgentState) -> dict:
             coverage=coverage,
         )
 
+    # Built first and published straight away: it is the answer if the LLM
+    # fails or is rejected, and until then it is what the user reads instead of
+    # a spinner. Formatting already-fetched data costs milliseconds.
+    grounded = _assemble(_compose_fallback(state, grounding), notices, sources)
+    _emit_draft(guardrails.redact_output(grounded))
+
     response = None
     try:
         candidate = _compose_with_llm(state, _llm_context(state))
@@ -1294,10 +1321,7 @@ def respond_node(state: AgentState) -> dict:
         logger.warning("LLM composition failed, using deterministic template: %s", exc)
         error = f"{error + ' | ' if error else ''}compose_llm: {exc}"
 
-    if response is None:
-        response = _compose_fallback(state, grounding)
-
-    final = _assemble(response, notices, sources)
+    final = _assemble(response, notices, sources) if response is not None else grounded
 
     report = _check(final)
     if not report.passed:

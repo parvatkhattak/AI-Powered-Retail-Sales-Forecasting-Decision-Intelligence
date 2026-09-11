@@ -740,3 +740,51 @@ def test_a_reply_cut_off_at_the_token_limit_is_discarded(monkeypatch):
     assert response.rstrip().endswith(("metrics", "history", "trend"))
     assert "and then it" not in response
     assert "/day" in response
+
+
+def test_the_grounded_answer_is_published_before_the_model_is_asked(monkeypatch):
+    """Perceived latency, without giving up the check: the deterministic
+    composition costs milliseconds once the tools have run, so it goes on
+    screen while the model is still writing. Every version shown is grounded."""
+    order = []
+    drafts = []
+
+    def slow_llm(state, context):
+        order.append("llm")
+        return "Store 100 is averaging €8,333/day over the last 30 trading days."
+
+    monkeypatch.setattr(agent_graph, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(agent_graph, "_compose_with_llm", slow_llm)
+
+    def on_draft(text):
+        order.append("draft")
+        drafts.append(text)
+
+    with agent_graph.progress_reporting(lambda _s: None, on_draft=on_draft):
+        final = agent_graph.run_agent("How is Store 100 performing?", "draft-order")
+
+    assert order == ["draft", "llm"], f"draft must precede the model call: {order}"
+    assert drafts and "/day" in drafts[0]
+    assert "Sources" in drafts[0], "the draft must be a complete answer, not a fragment"
+    assert final != drafts[0], "the model's version should have replaced the draft"
+
+
+def test_the_draft_is_the_answer_when_the_model_fails(monkeypatch):
+    monkeypatch.setattr(agent_graph, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(agent_graph, "_compose_with_llm",
+                        lambda state, context: (_ for _ in ()).throw(RuntimeError("provider down")))
+
+    drafts = []
+    with agent_graph.progress_reporting(lambda _s: None, on_draft=drafts.append):
+        final = agent_graph.run_agent("How is Store 100 performing?", "draft-fallback")
+
+    assert drafts and final == drafts[0]
+
+
+def test_a_broken_draft_listener_never_breaks_the_answer():
+    def explode(_text):
+        raise RuntimeError("listener is broken")
+
+    with agent_graph.progress_reporting(lambda _s: None, on_draft=explode):
+        response = agent_graph.run_agent("How is Store 100 performing?", "broken-draft")
+    assert "/day" in response

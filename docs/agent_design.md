@@ -178,8 +178,27 @@ do as possible and to show the user what is happening meanwhile.
 Measured on the real database: what-if 1.6s → 0.08s, forecast 1.27s → 0.73s,
 fleet risk 8.8s → 4.5s, full test suite 123s → 79s.
 
-`progress_reporting(callback)` is a context manager that routes the current
-thread's stage messages to a listener. `pages/4_AI_Assistant.py` runs the agent
+### Progressive rendering
+
+The grounded answer is composed and published *before* the LLM is called.
+Formatting already-fetched data costs milliseconds; the model takes seconds. So
+the user reads a correct, fully validated answer almost immediately, and the
+model's version replaces it when it arrives — same facts, better prose. If the
+model fails or its answer is rejected by response validation, the draft simply
+stays, which is what used to happen anyway, just visible sooner.
+
+Measured first-paint on the real database: 0.22s for a single store, 5.17s for
+the fleet ranking (that one is genuinely 12 forecasts of work). Neither figure
+includes the model, because neither waits for it.
+
+This is deliberately *not* token-by-token streaming of the model's output: the
+ten response checks need the complete text before they can approve it, so live
+streaming would mean putting unvalidated figures on screen and retracting them.
+Showing the grounded answer first gets the same perceived speed with nothing
+unchecked ever displayed.
+
+`progress_reporting(callback, on_draft=...)` is a context manager that routes
+the current thread's stage messages, and the draft answer, to listeners. `pages/4_AI_Assistant.py` runs the agent
 on a worker thread and repaints a live elapsed timer and the current stage
 ("Running the 7-day forecast · 2.4s"), then reports the total on completion.
 The slow paths — fleet ranking and multi-store comparison — take an optional
