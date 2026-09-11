@@ -595,3 +595,78 @@ def test_contextual_followup_without_the_word_one():
 
     assert response != agent_graph.OUT_OF_SCOPE_REPLY
     assert "Store 100" in response and "Store 200" in response
+
+
+# ── Live-testing round: typos, bare comparisons, fabricated citations ────────
+
+def test_a_typo_in_the_verb_does_not_lose_the_store():
+    """"how is 250 perrforming" fell through to the scope refusal: the frame
+    that recognises a bare store number required the activity verb to be
+    spelled correctly, so one transposed letter dropped the store entirely."""
+    understanding = agent_graph.qu.understand("how is 250 perrforming", agent_graph._reference_date())
+    assert understanding.entities.store_candidates == [250]
+
+    response = agent_graph.run_agent("how is 100 perrforming", "typo")
+    assert response != agent_graph.OUT_OF_SCOPE_REPLY
+    assert "Store 100" in response and "/day" in response
+
+
+@pytest.mark.parametrize("question", [
+    "which store is better 100 or 500",
+    "is 100 or 500 better",
+    "compare 100 and 500",
+])
+def test_comparison_written_with_bare_numbers(question):
+    """"which store is better 100 or 500" named both stores and extracted
+    neither, so the decision engine reported "no specific store was identified"
+    and the answer relayed that as though it were a finding about the stores."""
+    understanding = agent_graph.qu.understand(question, agent_graph._reference_date())
+    assert understanding.entities.store_candidates == [100, 500], question
+
+
+def test_numbers_joined_by_or_outside_a_store_question_are_not_stores():
+    for question in ("I bought 300 or 400 items", "was it 300 or 400 units"):
+        understanding = agent_graph.qu.understand(question, agent_graph._reference_date())
+        assert understanding.entities.store_candidates == [], question
+
+
+def test_unidentifiable_stores_are_asked_about_not_invented(monkeypatch):
+    """A comparison whose stores can't be resolved must say so, rather than
+    running a report that reports its own emptiness."""
+    def _fail(*args, **kwargs):
+        raise AssertionError("must not build a report with no stores")
+
+    monkeypatch.setattr(decision_engine, "compare_stores_report", _fail)
+
+    response = agent_graph.run_agent("which is better, the first or the second?", "ambiguous")
+    lowered = response.lower()
+    assert "couldn't tell which stores" in lowered or "haven't discussed" in lowered
+    assert "no specific store was identified" not in lowered
+
+
+def test_citations_come_from_the_call_log_not_from_the_model(monkeypatch):
+    """Asked to cite "the sources you were given", the model cited the JSON key
+    `tool_results` as if it were a data source — and because the text then
+    contained the word "Sources", the real list was suppressed."""
+    def fake_llm(state, context):
+        return ("Store 100 is doing fine.\n\n"
+                "📚 Sources:\n- tool_results\n- my own knowledge")
+
+    monkeypatch.setattr(agent_graph, "_compose_with_llm", fake_llm)
+    monkeypatch.setattr(agent_graph, "LLM_API_KEY", "test-key")
+
+    response = agent_graph.run_agent("How is Store 100 performing?", "citations")
+
+    assert "tool_results" not in response
+    assert "my own knowledge" not in response
+    assert "database.get_store_metrics" in response
+    assert response.count("Sources") == 1, "more than one citation block survived"
+
+
+def test_the_ui_still_parses_one_source_per_line_after_the_rewrite():
+    response = agent_graph.run_agent("How is Store 100 performing?", "parse")
+    tail = response.split("Sources:")[-1].strip().splitlines()
+    parsed = [line.strip("- •*").strip() for line in tail if line.strip()]
+    assert len(parsed) >= 2
+    assert all("," not in source for source in parsed)
+    assert all(source.startswith(("database.", "model_engine.")) for source in parsed), parsed

@@ -244,10 +244,16 @@ def extract_store_candidates(query: str) -> list[int]:
 # "over 500 customers" into store lookups, so the frame does the work and the
 # ID range only confirms it.
 _BARE_STORE_FRAMES = (
-    re.compile(r"\bhow(?:\s+is|\s+are|\s+was)?\s+#?(\d{1,4})\b(?=[^.?!]*\b(?:perform\w*|doing|going|look\w*|track\w*|sell\w*|fare|faring)\b)", re.IGNORECASE),
+    # "how is 250 <anything>" — the trailing verb is deliberately not required.
+    # It used to be ("performing|doing|…"), which meant a typo like
+    # "how is 250 perrforming" silently produced no store at all.
+    re.compile(r"\bhow(?:\s+is|\s+are|\s+was|\s+did)?\s+#?(\d{1,4})\b", re.IGNORECASE),
     re.compile(r"\b(?:what|how)\s+about\s+#?(\d{1,4})\b", re.IGNORECASE),
     re.compile(r"\b(?:tell me about|info(?:rmation)? on|details? on|check|look at|show me|update on|status of)\s+#?(\d{1,4})\b", re.IGNORECASE),
-    re.compile(r"\b(?:compare|versus|vs\.?)\s+#?(\d{1,4})\s+(?:and|with|to|vs\.?|versus)\s+#?(\d{1,4})\b", re.IGNORECASE),
+    # Two numbers joined by or/vs/and inside a comparison — "which store is
+    # better, 100 or 500?" named both stores and neither was extracted.
+    re.compile(r"\b(?:compare|versus|vs\.?|between)\s+#?(\d{1,4})\s+(?:and|or|with|to|vs\.?|versus)\s+#?(\d{1,4})\b", re.IGNORECASE),
+    re.compile(r"#?(\d{1,4})\s+(?:or|vs\.?|versus)\s+#?(\d{1,4})\b", re.IGNORECASE),
     re.compile(r"^#?(\d{1,4})\s*\??$"),
 )
 
@@ -266,6 +272,21 @@ _QUANTIFIER_BEFORE_RE = re.compile(
 )
 
 
+# Guards the loosest two frames ("N or M", and the bare "how is N") to clauses
+# that are recognisably about stores at all.
+_STORE_CONTEXT_RE = re.compile(
+    r"\bstores?\b|\bshops?\b|\boutlets?\b|\bperform\w*\b|\bsales?\b|\brevenue\b"
+    r"|\bdoing\b|\bbetter\b|\bworse\b|\bcompar\w*\b|\bprioriti[sz]\w*\b|\bforecast\w*\b"
+    r"|\bpromo\w*\b|\btrend\w*\b|\brisk\w*\b|\bfocus\b",
+    re.IGNORECASE,
+)
+# Only the bare "N or M" frame needs the context guard. "How is 250 …" is
+# already specific enough on its own, and gating it on retail vocabulary meant
+# a typo in that very word ("perrforming") dropped the store entirely — the
+# unit-noun and ID-range guards are what actually keep quantities out.
+_LOOSE_FRAME_INDEXES = (4,)
+
+
 def extract_bare_store_candidates(query: str, low: int = 1, high: int = 1115) -> list[int]:
     """Store IDs named without the word "store" — "how is 300 performing?".
 
@@ -275,8 +296,11 @@ def extract_bare_store_candidates(query: str, low: int = 1, high: int = 1115) ->
     frame is what keeps "sales of 300 units" from becoming Store 300.
     """
     text = _unify_dashes(query)
+    has_store_context = bool(_STORE_CONTEXT_RE.search(text))
     found: list[int] = []
-    for frame in _BARE_STORE_FRAMES:
+    for index, frame in enumerate(_BARE_STORE_FRAMES):
+        if index in _LOOSE_FRAME_INDEXES and not has_store_context:
+            continue
         for match in frame.finditer(text):
             for group in range(1, (match.lastindex or 1) + 1):
                 raw = match.group(group)

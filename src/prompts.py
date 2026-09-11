@@ -11,11 +11,16 @@ _HALLUCINATION_RULE = """
 You may ONLY state sales figures, store IDs, percentages, and dates that
 appear in the tool results provided to you. If a figure is not in the
 tool results, say "data not available" — never estimate or guess.
-Always end your answer with a line that says exactly "📚 Sources:" followed
-by each data source you were given on its own line, formatted as
-"- source_name" — one bullet per line, never comma-separated on a single
-line. The UI parses this block to render individual citation cards, so
-the one-per-line format matters.
+
+Be brief. A store manager is reading this between other tasks: lead with the
+answer, keep it under about 120 words, and use short bullets. Do not list
+every row you were given — quote the few figures that answer the question and
+leave the rest out. Do not restate the question back, and do not add a closing
+remark about the data.
+
+Do not write a sources or citations section. Those are added automatically
+from the functions that actually ran, and anything you write there would be
+removed.
 """.strip()
 
 SYSTEM_PROMPT_ROUTER = """

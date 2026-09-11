@@ -42,6 +42,7 @@ from src.query_understanding import (
     DateRef,
     IntentSpec,
     Understanding,
+    is_fleet_risk_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,27 @@ def check_reference_resolution(understanding: Understanding, context: dict) -> l
     )]
 
 
+def check_answerable_without_a_store(understanding: Understanding) -> list[Finding]:
+    """A comparison or forecast question whose stores we could not identify."""
+    entities = understanding.entities
+    if entities.store_candidates or entities.references_prior_context:
+        return []
+    needs_store = [i for i in understanding.intents
+                   if i.type in ("forecast", "whatif")
+                   or (i.type == "recommend" and not is_fleet_risk_request(i.clause))]
+    if not needs_store:
+        return []
+    return [Finding(
+        code="store_not_identified",
+        severity="block",
+        message=(
+            "I couldn't tell which stores you mean. Numbers on their own are ambiguous — "
+            "write them as store IDs and I'll answer, for example \"compare Store 100 and "
+            "Store 500\" or \"which of Stores 100 and 500 is performing better?\"."
+        ),
+    )]
+
+
 def check_store_cap(understanding: Understanding) -> list[Finding]:
     if not understanding.entities.exceeds_store_cap:
         return []
@@ -459,6 +481,10 @@ def verify_claims(claims: list[Claim], store_ids: list[int], dates: list[DateRef
 
 # ── Plan building ────────────────────────────────────────────────────────────
 
+# A recommendation needs stores unless it is a fleet-wide risk question, which
+# supplies its own candidates. Without this, "which store is better, 100 or
+# 500?" produced a decision report saying "no specific store was identified"
+# and the answer relayed that as if it were a finding about the stores.
 _NEEDS_A_STORE = ("forecast", "whatif")
 
 
@@ -480,6 +506,8 @@ def build_plan(understanding: Understanding, known_stores: list[int],
         if spec.stores and not stores:
             continue  # every store in this step was unknown
         if not stores and spec.type in _NEEDS_A_STORE:
+            continue
+        if not stores and spec.type == "recommend" and not is_fleet_risk_request(spec.clause):
             continue
         if not stores and "unresolved_reference" in blocking_codes:
             continue
@@ -524,6 +552,7 @@ def validate(understanding: Understanding, context: dict | None = None,
     findings += check_horizon(understanding.entities.horizon_days, coverage)
     findings += check_operation(understanding)
     findings += check_reference_resolution(understanding, context)
+    findings += check_answerable_without_a_store(understanding)
     findings += check_store_cap(understanding)
 
     verdicts: list[ClaimVerdict] = []

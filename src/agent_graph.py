@@ -1070,7 +1070,7 @@ _PROMPT_BY_INTENT = {
 
 # Monthly history back to 2013 is 31 rows per store, and a writer needs the
 # recent shape, not the archive.
-_MAX_TREND_MONTHS = 6
+_MAX_TREND_MONTHS = 3
 
 
 def _llm_payload(step: dict) -> dict:
@@ -1262,6 +1262,11 @@ def respond_node(state: AgentState) -> dict:
     return {"response": guardrails.redact_output(final), "error": error, "grounding": grounding}
 
 
+# Matches a citation block to the end of the text, with or without the emoji.
+_SOURCES_BLOCK_RE = re.compile(r"\n*(?:📚\s*)?\**\s*(?:Data\s+)?Sources?\s*:?\**\s*\n.*\Z",
+                               re.IGNORECASE | re.DOTALL)
+
+
 def _assemble(body: str, notices: list[str], sources: list[str]) -> str:
     """Notices first, then the answer, then citations.
 
@@ -1275,7 +1280,16 @@ def _assemble(body: str, notices: list[str], sources: list[str]) -> str:
     parts.append(body)
     text = "\n\n".join(p for p in parts if p)
 
-    if sources and "sources" not in text.lower():
+    # Any citation block the model wrote itself is discarded and replaced with
+    # the functions that actually ran. Asked to "cite the sources you were
+    # given", a model will cite whatever it sees — one run cited the JSON key
+    # "tool_results" as though it were a data source, and because the text then
+    # contained the word "Sources" the real list was suppressed. Citations are
+    # a record of what executed, so they are written from the call log, never
+    # by the model.
+    text = _SOURCES_BLOCK_RE.sub("", text).rstrip()
+
+    if sources:
         # One source per line, not comma-separated — pages/4_AI_Assistant.py
         # (Dikshit) splits this block on newlines to build separate citation
         # cards; a single comma-joined line renders as one garbled citation.
