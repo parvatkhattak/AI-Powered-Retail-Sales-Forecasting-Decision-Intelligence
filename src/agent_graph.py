@@ -140,13 +140,20 @@ _RANKING_RE = re.compile(r"\b(top|bottom|best|worst|highest|lowest|rank(?:ed|ing
 _WORST_RE = re.compile(r"\b(bottom|worst|lowest|underperform\w*|weakest)\b", re.IGNORECASE)
 _PROMO_RE = re.compile(r"\b(promo\w*|uplift)\b", re.IGNORECASE)
 _COUNT_RE = re.compile(r"\b(?:top|bottom|best|worst|first|last)\s+(\d{1,3})\b|\b(\d{1,3})\s+(?:stores?|performers?)\b", re.IGNORECASE)
+_PLURAL_RE = re.compile(r"\b(stores|performers|shops|outlets|ones)\b", re.IGNORECASE)
 
 _DEFAULT_RANKING_SIZE = 10
 _MAX_RANKING_SIZE = 25
 
 
 def _parse_fleet_request(query: str) -> dict:
-    """Work out which fleet-wide report a store-less question is asking for."""
+    """Work out which fleet-wide report a store-less question is asking for.
+
+    How many rows to return follows the phrasing, so the answer matches the
+    question: an explicit count wins ("top 15" -> 15); otherwise plural asks
+    for a list ("best stores" -> 10) and singular asks for one ("best store
+    among all" -> just that store).
+    """
     wants_ranking = bool(_RANKING_RE.search(query))
     match = _COUNT_RE.search(query)
     requested = next((int(g) for g in (match.groups() if match else []) if g), None)
@@ -158,9 +165,16 @@ def _parse_fleet_request(query: str) -> dict:
     else:
         kind = "summary"
 
+    if requested is not None:
+        size = min(requested, _MAX_RANKING_SIZE)
+    elif _PLURAL_RE.search(query):
+        size = _DEFAULT_RANKING_SIZE
+    else:
+        size = 1
+
     return {
         "kind": kind,
-        "n": min(requested or _DEFAULT_RANKING_SIZE, _MAX_RANKING_SIZE),
+        "n": size,
         "ascending": bool(_WORST_RE.search(query)),
     }
 
@@ -382,6 +396,41 @@ def _compose_with_llm(state: AgentState, context: dict) -> str:
     return llm.invoke(messages).content
 
 
+def _summarise_store_performance(store_id: int, metric_rows: list[dict], promo: dict | None) -> str:
+    """Plain-language performance summary for one store, from rows the data
+    analyst node already fetched — average, direction of travel, promo uplift."""
+    sales = [
+        r["sales"] for r in metric_rows
+        if r.get("store_id") == store_id and r.get("sales") is not None
+    ]
+    if not sales:
+        return ""
+
+    average = sum(sales) / len(sales)
+    midpoint = len(sales) // 2
+    earlier, recent = sales[:midpoint], sales[midpoint:]
+    if midpoint and sum(earlier):
+        change = (sum(recent) / len(recent) - sum(earlier) / len(earlier)) / (sum(earlier) / len(earlier)) * 100
+        direction = "up" if change >= 0 else "down"
+        trend = f"Sales are **{direction} {abs(change):.1f}%** across that period."
+    else:
+        trend = "Not enough history yet to read a trend."
+
+    lines = [
+        f"**Store {store_id} is averaging €{average:,.0f}/day** over the last "
+        f"{len(sales)} trading days.\n",
+        f"- {trend}",
+        f"- Best day €{max(sales):,.0f}, quietest day €{min(sales):,.0f}",
+    ]
+    if promo and promo.get("uplift_pct"):
+        lines.append(
+            f"- Promotions lift this store **{promo['uplift_pct']:.1f}%** "
+            f"(€{promo.get('promo_avg_sales', 0):,.0f}/day on promo vs "
+            f"€{promo.get('non_promo_avg_sales', 0):,.0f}/day without)"
+        )
+    return "\n".join(lines)
+
+
 def _compose_fallback(state: AgentState) -> str:
     """Deterministic formatting used when the LLM is unavailable — keeps the agent
     testable and crash-free without an API key (docs/architecture.md 13, "Agent
@@ -413,9 +462,20 @@ def _compose_fallback(state: AgentState) -> str:
 
     if tool_results.get("sales_ranking"):
         rows = tool_results["sales_ranking"]
-        request = tool_results.get("fleet_request", {})
-        label = "Lowest" if request.get("ascending") else "Top"
-        lines = [f"**{label} {len(rows)} stores by average daily sales:**\n"]
+        ascending = tool_results.get("fleet_request", {}).get("ascending", False)
+
+        if len(rows) == 1:
+            r = rows[0]
+            superlative = "lowest-performing" if ascending else "best-performing"
+            return (
+                f"**Store {r['Store']} is the {superlative} store**, averaging "
+                f"**€{r['avg_daily_sales']:,.0f}/day**.\n\n"
+                f"That's €{r['total_sales']:,.0f} in total sales across "
+                f"{r['days_trading']:,} trading days."
+            )
+
+        label = "Lowest" if ascending else "Top"
+        lines = [f"**{label} {len(rows)} stores by average daily sales**\n"]
         lines += [
             f"{i}. **Store {r['Store']}** — €{r['avg_daily_sales']:,.0f}/day "
             f"(€{r['total_sales']:,.0f} total over {r['days_trading']:,} trading days)"
@@ -425,7 +485,17 @@ def _compose_fallback(state: AgentState) -> str:
 
     if tool_results.get("promo_ranking"):
         rows = tool_results["promo_ranking"]
-        lines = [f"**Top {len(rows)} stores by promotional uplift:**\n"]
+
+        if len(rows) == 1:
+            r = rows[0]
+            return (
+                f"**Store {r['Store']} has the highest promotional uplift** at "
+                f"**{r['uplift_pct']:.1f}%**.\n\n"
+                f"It averages €{r['promo_avg_sales']:,.0f}/day on promo days versus "
+                f"€{r['non_promo_avg_sales']:,.0f}/day without one."
+            )
+
+        lines = [f"**Top {len(rows)} stores by promotional uplift**\n"]
         lines += [
             f"{i}. **Store {r['Store']}** — {r['uplift_pct']:.1f}% uplift "
             f"(promo €{r['promo_avg_sales']:,.0f}/day vs non-promo €{r['non_promo_avg_sales']:,.0f}/day)"
@@ -436,10 +506,12 @@ def _compose_fallback(state: AgentState) -> str:
     if tool_results.get("eda_summary"):
         s = tool_results["eda_summary"]
         return (
-            f"Across {s.get('total_stores', 'N/A')} stores, average daily sales are "
-            f"€{s.get('avg_daily_sales', 0):,.0f}. Store {s.get('best_store_id')} performs best "
-            f"(€{s.get('best_store_avg_sales', 0):,.0f}/day) and Store {s.get('worst_store_id')} "
-            f"performs worst (€{s.get('worst_store_avg_sales', 0):,.0f}/day)."
+            f"**Average daily sales across the fleet: €{s.get('avg_daily_sales', 0):,.0f}** "
+            f"({s.get('total_stores', 'N/A')} stores).\n\n"
+            f"- Best performer: **Store {s.get('best_store_id')}** at "
+            f"€{s.get('best_store_avg_sales', 0):,.0f}/day\n"
+            f"- Lowest performer: **Store {s.get('worst_store_id')}** at "
+            f"€{s.get('worst_store_avg_sales', 0):,.0f}/day"
         )
 
     if tool_results.get("forecast"):
@@ -451,7 +523,16 @@ def _compose_fallback(state: AgentState) -> str:
         return "\n".join(lines) if lines else "No forecast data available for the requested store(s)."
 
     if tool_results.get("store_metrics"):
-        return f"Retrieved {len(tool_results['store_metrics'])} days of sales history for store(s) {', '.join(map(str, store_ids))}."
+        # Actually answer "how is this store doing" rather than reporting that
+        # rows were fetched, which told the user nothing.
+        summaries = [
+            _summarise_store_performance(sid, tool_results["store_metrics"],
+                                         (tool_results.get("promo_history") or {}).get(sid))
+            for sid in store_ids
+        ]
+        summaries = [s for s in summaries if s]
+        if summaries:
+            return "\n\n".join(summaries)
 
     return "I couldn't find enough data to answer that. Try mentioning a specific store ID, e.g. 'How is Store 100 performing?'"
 

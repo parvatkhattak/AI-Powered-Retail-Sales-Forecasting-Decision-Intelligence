@@ -241,15 +241,23 @@ def test_real_mode_missing_db_returns_friendly_error_not_a_crash(monkeypatch, tm
 @pytest.mark.parametrize(
     "query,expected_kind,expected_n,expected_ascending",
     [
+        # Explicit count wins.
         ("top 10 performers in order", "sales_ranking", 10, False),
         ("top 15", "sales_ranking", 15, False),
         ("bottom 5 stores", "sales_ranking", 5, True),
-        ("worst performing store", "sales_ranking", 10, True),
-        ("best performing store", "sales_ranking", 10, False),
-        ("which stores have the highest promo uplift?", "promo_ranking", 10, False),
-        ("average sales", "summary", 10, False),
-        ("how are we doing overall across the fleet?", "summary", 10, False),
         ("top 500 stores", "sales_ranking", 25, False),   # clamped to the cap
+        # Plural with no count asks for a list.
+        ("best stores", "sales_ranking", 10, False),
+        ("which stores have the highest promo uplift?", "promo_ranking", 10, False),
+        # Singular asks for exactly one store — "best store among all" should
+        # name the best store, not hand back a top-10 list.
+        ("best store among all", "sales_ranking", 1, False),
+        ("worst performing store", "sales_ranking", 1, True),
+        ("best performing store", "sales_ranking", 1, False),
+        ("store with best promo uplift", "promo_ranking", 1, False),
+        # No ranking language at all.
+        ("average sales", "summary", 1, False),
+        ("how are we doing overall across the fleet?", "summary", 1, False),
     ],
 )
 def test_fleet_questions_are_routed_to_different_reports(query, expected_kind, expected_n, expected_ascending):
@@ -275,6 +283,22 @@ def test_fleet_questions_produce_different_answers():
         "fleet questions collapsed to the same answer:\n"
         + "\n".join(f"  {q!r} -> {a[:60]!r}" for q, a in answers.items())
     )
+
+
+def test_singular_question_names_one_store_not_a_list():
+    """"best store among all" must answer with the best store. It used to
+    return a numbered top-10, which answers a question nobody asked."""
+    answer = agent_graph.run_agent("best store among all")
+    assert "1. " not in answer and "2. " not in answer, f"got a list, not one store:\n{answer}"
+    assert "best-performing store" in answer
+
+
+def test_single_store_question_summarises_performance():
+    """The performance answer used to be "Retrieved N days of sales history
+    for store(s) 100", which reports plumbing rather than answering."""
+    answer = agent_graph.run_agent("How is Store 100 performing?")
+    assert "Retrieved" not in answer
+    assert "/day" in answer, f"expected an average daily figure:\n{answer}"
 
 
 def test_bare_ranking_phrasing_is_in_scope():
