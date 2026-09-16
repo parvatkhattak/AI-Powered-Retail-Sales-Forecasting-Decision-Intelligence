@@ -1,7 +1,5 @@
 """
 pages/5_⚙️_Model_Performance.py
-Owner: Dikshit — UI Developer
-
 ML transparency and model evaluation page.
 
 Sections:
@@ -154,7 +152,6 @@ with st.sidebar:
     )
     st.divider()
     st.caption("📦 Dataset: Rossmann Store Sales")
-    st.caption("🏗️ Owner: Dikshit (pages/)")
 
 # ── Page Header ───────────────────────────────────────────────────────────────
 col_title, col_badge = st.columns([3, 1])
@@ -460,7 +457,6 @@ st.markdown(
     """
     <div style='text-align:center; color:#8B8FA8; font-size:0.78rem; padding:16px 0 8px;'>
         ⚙️ Model Performance &nbsp;·&nbsp; Retail AI Decision Intelligence Platform &nbsp;·&nbsp;
-        Owner: <strong>Dikshit</strong> &nbsp;·&nbsp;
         Models: <strong>LightGBM + XGBoost + SHAP</strong>
     </div>
     """,

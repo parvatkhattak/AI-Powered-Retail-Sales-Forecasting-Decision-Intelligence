@@ -1,7 +1,5 @@
 """
 pages/4_🤖_AI_Assistant.py
-Owner: Dikshit — UI Developer
-
 Streaming chat interface powered by src/agent_graph.py.
 
 Features:
@@ -152,7 +150,6 @@ with st.sidebar:
         st.rerun()
 
     st.caption("📦 Dataset: Rossmann Store Sales")
-    st.caption("🏗️ Owner: Dikshit (pages/)")
 
 # ── Page Header ───────────────────────────────────────────────────────────────
 col_title, col_badge = st.columns([3, 1])
@@ -364,7 +361,6 @@ st.markdown(
     """
     <div style='text-align:center; color:#8B8FA8; font-size:0.78rem; padding:16px 0 8px;'>
         🤖 AI Assistant &nbsp;·&nbsp; Retail AI Decision Intelligence Platform &nbsp;·&nbsp;
-        Owner: <strong>Dikshit</strong> &nbsp;·&nbsp;
         Powered by: <strong>LangGraph + LLM</strong>
     </div>
     """,

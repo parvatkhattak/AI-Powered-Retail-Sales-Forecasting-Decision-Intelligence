@@ -1,7 +1,5 @@
 """
 pages/1_🏠_Dashboard.py
-Owner: Dikshit — UI Developer
-
 Fleet-wide sales analytics dashboard.
 
 Sections:
@@ -275,7 +273,6 @@ with st.sidebar:
 
     st.divider()
     st.caption("📦 Dataset: Rossmann Store Sales")
-    st.caption("🏗️ Owner: Dikshit (pages/)")
 
 
 # ── Page Header ───────────────────────────────────────────────────────────────
@@ -661,7 +658,6 @@ st.markdown(
     """
     <div style='text-align:center; color:#8B8FA8; font-size:0.78rem; padding:16px 0 8px;'>
         🏠 Dashboard  ·  Retail AI Decision Intelligence Platform  ·
-        Owner: <strong>Dikshit</strong>  ·
         Data: <a href='https://www.kaggle.com/c/rossmann-store-sales' style='color:#6C63FF;'>Rossmann Store Sales</a>
     </div>
     """,

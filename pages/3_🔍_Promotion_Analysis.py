@@ -1,7 +1,5 @@
 """
 pages/3_🔍_Promotion_Analysis.py
-Owner: Dikshit — UI Developer
-
 Deep-dive into promotional behaviour across the fleet and per store.
 
 Sections:
@@ -177,7 +175,6 @@ with st.sidebar:
     )
     st.divider()
     st.caption("📦 Dataset: Rossmann Store Sales")
-    st.caption("🏗️ Owner: Dikshit (pages/)")
 
 
 # ── Page Header ───────────────────────────────────────────────────────────────
@@ -466,7 +463,6 @@ st.markdown(
     """
     <div style='text-align:center; color:#8B8FA8; font-size:0.78rem; padding:16px 0 8px;'>
         🔍 Promotion Analysis &nbsp;·&nbsp; Retail AI Decision Intelligence Platform &nbsp;·&nbsp;
-        Owner: <strong>Dikshit</strong> &nbsp;·&nbsp;
         Data: <a href='https://www.kaggle.com/c/rossmann-store-sales' style='color:#FF6584;'>Rossmann Store Sales</a>
     </div>
     """,
