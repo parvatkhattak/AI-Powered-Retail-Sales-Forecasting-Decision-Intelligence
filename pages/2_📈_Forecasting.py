@@ -305,6 +305,74 @@ def render_kpi_row(store_id: int, forecast, calendar):
     c3.metric("🏷️ Promo Days", f"{promo_days} of 7")
     c4.metric("🚪 Closed Days", f"{closed_days} of 7")
 
+    # ── Animated Confidence Meter ─────────────────────────────────────────────
+    # Confidence = how tight the forecast band is relative to the prediction.
+    # Narrow band (LowerBound close to UpperBound) → high confidence.
+    open_f = forecast[forecast["PredictedSales"] > 0]
+    if not open_f.empty and "LowerBound" in open_f.columns and "UpperBound" in open_f.columns:
+        avg_pred  = open_f["PredictedSales"].mean()
+        avg_range = (open_f["UpperBound"] - open_f["LowerBound"]).mean()
+        raw_conf  = max(0.0, 1.0 - (avg_range / avg_pred / 2)) if avg_pred else 0.0
+        confidence_pct = round(min(raw_conf, 1.0) * 100)
+    else:
+        confidence_pct = 72   # sensible default when bounds not available
+
+    if   confidence_pct >= 80: bar_color, label, label_color = "#10b981", "High", "#10b981"
+    elif confidence_pct >= 60: bar_color, label, label_color = "#f59e0b", "Moderate", "#f59e0b"
+    else:                       bar_color, label, label_color = "#ef4444", "Low", "#ef4444"
+
+    st.markdown(
+        f"""
+        <style>
+        @keyframes fillBar {{
+            from {{ width: 0%; }}
+            to   {{ width: {confidence_pct}%; }}
+        }}
+        .conf-wrap {{
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 14px;
+            padding: 14px 20px 12px;
+            margin: 14px 0 4px;
+        }}
+        .conf-label-row {{
+            display: flex; justify-content: space-between;
+            align-items: center; margin-bottom: 8px;
+        }}
+        .conf-title  {{ font-size: 0.85rem; color: #8B8FA8; font-weight: 500; }}
+        .conf-badge  {{
+            font-size: 0.82rem; font-weight: 700; color: {label_color};
+            background: rgba(255,255,255,0.05); border-radius: 20px;
+            padding: 2px 10px; border: 1px solid {label_color}44;
+        }}
+        .conf-pct    {{ font-size: 1.05rem; font-weight: 700; color: {bar_color}; }}
+        .conf-track  {{
+            width: 100%; height: 10px; border-radius: 999px;
+            background: rgba(255,255,255,0.08); overflow: hidden;
+        }}
+        .conf-fill   {{
+            height: 100%; border-radius: 999px;
+            background: linear-gradient(90deg, {bar_color}aa, {bar_color});
+            animation: fillBar 1.2s cubic-bezier(.4,0,.2,1) forwards;
+            box-shadow: 0 0 8px {bar_color}55;
+        }}
+        </style>
+        <div class="conf-wrap">
+            <div class="conf-label-row">
+                <span class="conf-title">🎯 Model Confidence</span>
+                <span class="conf-badge">{label}</span>
+                <span class="conf-pct">{confidence_pct}%</span>
+            </div>
+            <div class="conf-track">
+                <div class="conf-fill"></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+
 
 def build_shap_driver_chart(shap_dict: dict):
     """Horizontal bar of the top 5 features moving tomorrow's prediction —
