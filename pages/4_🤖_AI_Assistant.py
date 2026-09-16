@@ -25,6 +25,12 @@ from uuid import uuid4
 
 import streamlit as st
 
+try:
+    from streamlit_mic_recorder import speech_to_text
+    VOICE_ENABLED = True
+except ImportError:
+    VOICE_ENABLED = False
+
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,6 +96,16 @@ st.markdown(
         transition: background 0.2s;
     }
     .chip:hover { background: rgba(108,99,255,0.25); }
+    /* Voice input strip */
+    .voice-strip {
+        display: flex; align-items: center; gap: 10px;
+        background: rgba(67,217,164,0.06);
+        border: 1px dashed rgba(67,217,164,0.35);
+        border-radius: 12px;
+        padding: 8px 14px;
+        margin: 8px 0 0;
+        font-size: 0.85rem; color: #43D9A4;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -127,8 +143,9 @@ with st.sidebar:
         """
         **How to use:**
         1. Type a question or click an example chip below
-        2. The assistant queries real store data
-        3. Citations show which data sources were used
+        2. Or click **🎤 Click to speak** to ask by voice
+        3. The assistant queries real store data
+        4. Citations show which data sources were used
 
         **Supported query types:**
         - 🔍 *Performance* — "How is Store 125 doing?"
@@ -206,6 +223,26 @@ typed_query = st.chat_input(
     "Ask anything about your stores… e.g. 'Which store should I focus on next week?'",
     key="chat_input",
 )
+
+# ── Voice Input ───────────────────────────────────────────────────────────────
+if VOICE_ENABLED:
+    st.markdown(
+        '<div class="voice-strip">🎤 Or speak your question:</div>',
+        unsafe_allow_html=True,
+    )
+    voice_text = speech_to_text(
+        language="en",
+        start_prompt="🎤 Click to speak",
+        stop_prompt="⏹️ Stop recording",
+        just_once=True,
+        use_container_width=True,
+        callback=None,
+        key="voice_input",
+    )
+    # Transcribed speech feeds into the same flow as typed / chip input
+    if voice_text:
+        st.session_state["pending_query"] = voice_text
+
 prompt = st.session_state.pop("pending_query", "") or typed_query
 
 if prompt:

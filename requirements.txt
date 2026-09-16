@@ -34,3 +34,4 @@ python-dotenv>=1.0
 # Testing
 pytest>=8.0
 pytest-cov>=4.0
+streamlit-mic-recorder>=0.0.8
