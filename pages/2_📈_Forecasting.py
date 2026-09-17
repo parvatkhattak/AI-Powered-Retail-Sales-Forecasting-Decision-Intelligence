@@ -299,11 +299,39 @@ def render_kpi_row(store_id: int, forecast, calendar):
     promo_days = int(calendar.loc[calendar["Open"] == 1, "Promo"].sum()) if not calendar.empty else 0
     closed_days = 7 - len(open_days)
 
-    c1, c2, c3, c4 = st.columns(4)
+    # — Accuracy badge: pull from model metrics (store-level RMSPE not available,
+    # so we use the fleet RMSPE as the headline accuracy number)
+    _store_acc = None
+    try:
+        from src.model_engine import get_model_metrics as _gmm
+        _mmet = _gmm()
+        _fleet_rmspe = _mmet.get("lightgbm", {}).get("rmspe", None)
+        if _fleet_rmspe is not None:
+            _store_acc = round((1.0 - _fleet_rmspe) * 100, 1)
+    except Exception:
+        pass
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("📦 Next 7 Days", f"€{week_total:,}")
     c2.metric("📊 Daily Average", f"€{avg_daily:,.0f}", delta=f"{pct_vs_baseline:+.0f}% vs usual")
     c3.metric("🏷️ Promo Days", f"{promo_days} of 7")
     c4.metric("🚪 Closed Days", f"{closed_days} of 7")
+    with c5:
+        if _store_acc is not None:
+            _acc_color = "#10b981" if _store_acc >= 85 else "#f59e0b" if _store_acc >= 75 else "#ef4444"
+            st.markdown(
+                f"""
+                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
+                            border-radius:10px;padding:10px 12px 8px;text-align:center;">
+                    <div style="font-size:0.72rem;color:#8B8FA8;margin-bottom:4px;">🎯 Model Accuracy</div>
+                    <div style="font-size:1.5rem;font-weight:800;color:{_acc_color};">{_store_acc}%</div>
+                    <div style="font-size:0.68rem;color:#6b7280;margin-top:2px;">Fleet RMSPE basis</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.metric("🎯 Accuracy", "N/A")
 
     # ── Animated Confidence Meter ─────────────────────────────────────────────
     # Confidence = how tight the forecast band is relative to the prediction.
@@ -631,6 +659,60 @@ elif st.session_state.stage == "explaining":
     fig = build_promo_whatif_chart(store_id)
     if fig is not None:
         st.plotly_chart(fig, use_container_width=True, key=f"promo_{store_id}")
+
+    # ── Best Time to Run a Promotion Calendar ─────────────────────────────────
+    section_heading("Best Day to Run a Promotion", "blue")
+    try:
+        _p_on  = get_whatif_forecast(store_id, True)
+        _p_off = get_whatif_forecast(store_id, False)
+        if not _p_on.empty and not _p_off.empty:
+            _uplift = (_p_on["PredictedSales"].values - _p_off["PredictedSales"].values)
+            _best_idx   = int(_uplift.argmax())
+            _max_uplift = float(_uplift.max())
+            _min_uplift = float(_uplift.min())
+            _range      = max(_max_uplift - _min_uplift, 1.0)
+
+            _day_cells = []
+            for _i, (_row_on, _row_off) in enumerate(
+                zip(_p_on.itertuples(), _p_off.itertuples())
+            ):
+                _d   = str(getattr(_row_on, "Date", ""))[:10]
+                _day = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][_i % 7]
+                _upl = float(getattr(_row_on, "PredictedSales", 0)) - float(getattr(_row_off, "PredictedSales", 0))
+                _t   = max(0.0, (_upl - _min_uplift) / _range)   # 0–1 normalised
+                _r   = int(239 - _t * (239 - 16))
+                _g   = int(68  + _t * (185 - 68))
+                _b   = int(68  + _t * (129 - 68))
+                _bg  = f"rgba({_r},{_g},{_b},0.25)"
+                _bdr = f"rgb({_r},{_g},{_b})"
+                _best_ring = "box-shadow:0 0 0 2px #fff,0 0 0 4px #10b981;" if _i == _best_idx else ""
+                _label = "🏆" if _i == _best_idx else ""
+                _cell = (
+                    f"<div style='flex:1;min-width:72px;background:{_bg};border:1.5px solid {_bdr};"
+                    f"border-radius:12px;padding:10px 6px;text-align:center;{_best_ring}'>"
+                    f"<div style='font-size:0.72rem;color:#9ca3af;'>{_day}</div>"
+                    f"<div style='font-size:0.68rem;color:#6b7280;'>{_d[5:]}</div>"
+                    f"<div style='font-size:1.0rem;font-weight:700;color:{_bdr};margin-top:4px;'>"
+                    f"+€{int(_upl):,}</div>"
+                    f"<div style='font-size:1.1rem;margin-top:2px;'>{_label}</div>"
+                    f"</div>"
+                )
+                _day_cells.append(_cell)
+
+            _best_date = str(getattr(list(_p_on.itertuples())[_best_idx], "Date", ""))[:10]
+            st.markdown(
+                f"<div style='font-size:0.83rem;color:#8B8FA8;margin-bottom:8px;'>"
+                f"Promo uplift per day vs no-promo scenario — "
+                f"<b style='color:#10b981;'>🏆 Best day: {_best_date} (+€{int(_max_uplift):,})</b></div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div style='display:flex;gap:8px;flex-wrap:nowrap;overflow-x:auto;padding:4px 0;'>" +
+                "".join(_day_cells) + "</div>",
+                unsafe_allow_html=True,
+            )
+    except Exception:
+        st.info("Promo calendar unavailable for this store.")
 
     section_heading("Model Agreement", "purple")
     fig = build_model_comparison_chart(store_id)

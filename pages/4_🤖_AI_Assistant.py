@@ -26,6 +26,7 @@ from uuid import uuid4
 import streamlit as st
 
 try:
+    # pyrefly: ignore [missing-import]
     from streamlit_mic_recorder import speech_to_text
     VOICE_ENABLED = True
 except ImportError:
@@ -215,6 +216,19 @@ for msg in st.session_state["messages"]:
         if msg["role"] == "assistant" and msg.get("sources"):
             citation_card(msg["sources"])
 
+        # Response time badge — persists across re-runs
+        if msg["role"] == "assistant" and msg.get("elapsed_s") is not None:
+            _e = msg["elapsed_s"]
+            _spd = "fast" if _e < 5 else "medium" if _e < 15 else "slow"
+            _bc  = {"fast": "#10b981", "medium": "#f59e0b", "slow": "#ef4444"}[_spd]
+            st.markdown(
+                f"<span style='display:inline-block;background:rgba(255,255,255,0.05);"
+                f"border:1px solid {_bc}44;border-radius:20px;padding:2px 10px;"
+                f"font-size:0.76rem;color:{_bc};margin-top:4px;'>"
+                f"⚡ Answered in {_e:.1f}s</span>",
+                unsafe_allow_html=True,
+            )
+
 # ── Chat Input ────────────────────────────────────────────────────────────────
 # st.chat_input is rendered unconditionally. It used to sit on the right-hand
 # side of an `or`, so clicking an example chip short-circuited it away and the
@@ -328,7 +342,15 @@ if st.session_state.get("awaiting_answer"):
                     if i % 6 == 0:
                         response_placeholder.markdown(shown + "▌")
             response_placeholder.markdown(full_response)
-            status_placeholder.caption(f"✅ Answered in **{elapsed:.1f}s**")
+            # Live badge — also captured in elapsed for session state below
+            st.markdown(
+                f"<span style='display:inline-block;background:rgba(255,255,255,0.05);"
+                f"border:1px solid #10b98144;border-radius:20px;padding:2px 10px;"
+                f"font-size:0.76rem;color:#10b981;margin-top:4px;'>"
+                f"⚡ Answered in {elapsed:.1f}s</span>",
+                unsafe_allow_html=True,
+            )
+            status_placeholder.empty()
 
             # Citations are only ever what the agent actually reported. There
             # used to be a fallback that invented two source names when none
@@ -364,6 +386,7 @@ if st.session_state.get("awaiting_answer"):
                 "role": "assistant",
                 "content": full_response or "⚠️ That answer didn't finish. Please ask again.",
                 "sources": sources,
+                "elapsed_s": elapsed if "elapsed" in dir() else None,
             })
 
 # ── Empty state when no messages yet ─────────────────────────────────────────
