@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env.local
+
+# Data files — mount via Docker volume instead of baking into the image
+# (comment out if you want train.csv / store.csv baked in)
+data/train.csv
+data/store.csv
+data/test.csv
+data/retail.db
+
+# Model artefacts — these ARE baked in so the app runs without retraining
+# models/
+
+# Jupyter
+notebooks/.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Pytest cache
+.pytest_cache/
+*.egg-info/
+
+# Build
+dist/
+build/
