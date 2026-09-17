@@ -594,16 +594,31 @@ st.divider()
 
 section_header("🏪 Performance by Store Type", "Average sales broken down by StoreType (a / b / c / d)")
 
-type_df = all_stores_df.copy() if not all_stores_df.empty else pd.DataFrame()
+# Build type_df with avg_sales directly from the DB — all_stores_df only
+# carries metadata (Store, StoreType) without sales averages, so using it
+# directly always produces an empty figure.
+type_df = pd.DataFrame()
+
+if not USE_MOCKS:
+    try:
+        import sqlite3 as _sq
+        from config import DB_PATH as _DP
+        _conn = _sq.connect(_DP)
+        type_df = pd.read_sql(
+            "SELECT StoreType, AVG(Sales) AS avg_sales, COUNT(DISTINCT Store) AS store_count "
+            "FROM sales WHERE Open=1 AND Sales>0 GROUP BY StoreType ORDER BY avg_sales DESC",
+            _conn,
+        )
+        _conn.close()
+    except Exception:
+        type_df = pd.DataFrame()
 
 if type_df.empty and USE_MOCKS:
-    # Build synthetic store-type breakdown from mock data
     raw_metrics = _load_mock_json("mock_store_metrics.json")
     if raw_metrics:
         _mdf2 = pd.DataFrame(raw_metrics)
         per_store_avg = _mdf2.groupby("store_id")["sales"].mean().reset_index()
         per_store_avg.columns = ["Store", "avg_sales"]
-        # Fake store types for mock stores
         _type_map = {100: "a", 200: "b", 300: "a", 400: "c", 500: "d"}
         per_store_avg["StoreType"] = per_store_avg["Store"].map(_type_map).fillna("a")
         type_df = per_store_avg
@@ -616,6 +631,7 @@ if not type_df.empty:
         show_empty_state("Store type column missing — will populate once database is live.")
 else:
     show_empty_state("Store type data not available.")
+
 
 st.divider()
 
