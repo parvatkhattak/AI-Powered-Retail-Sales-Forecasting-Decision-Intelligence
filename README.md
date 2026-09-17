@@ -2,10 +2,13 @@
 
 > **An AI-powered platform that helps retail store managers analyze performance, predict future sales, and receive evidence-backed recommendations — all through a natural language interface.**
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red?logo=streamlit)](https://streamlit.io)
+[![LightGBM](https://img.shields.io/badge/LightGBM-Primary_Model-green)](https://lightgbm.readthedocs.io)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0+-orange)](https://xgboost.readthedocs.io)
-[![LangGraph](https://img.shields.io/badge/LangGraph-Agent-green)](https://langchain-ai.github.io/langgraph/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Agent-purple)](https://langchain-ai.github.io/langgraph/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com)
+[![Tests](https://img.shields.io/badge/Tests-288_passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 ---
@@ -18,15 +21,16 @@
 - [Features](#-features)
 - [Tech Stack](#-tech-stack)
 - [Project Structure](#-project-structure)
-- [Quick Start](#-quick-start)
-- [How to Run](#-how-to-run)
-- [How the AI Works](#-how-the-ai-works)
+- [Quick Start — Docker](#-quick-start--docker-one-command)
+- [Quick Start — Local](#-quick-start--local)
 - [Application Pages](#-application-pages)
+- [How the AI Works](#-how-the-ai-works)
 - [Dataset](#-dataset)
 - [Running Tests](#-running-tests)
 - [The Curveball Question](#-the-curveball-question)
 - [Known Limitations](#-known-limitations)
 - [Documentation](#-documentation)
+- [Contributing](#-contributing)
 
 ---
 
@@ -35,89 +39,82 @@
 This platform answers real business questions for a retail manager who operates 1,000+ stores:
 
 | Question | How We Answer It |
-|----------|-----------------|
+|----------|--------------------|
 | *"How is Store 125 performing?"* | Historical sales charts, KPI metrics, trend analysis |
-| *"What sales can I expect next week?"* | XGBoost 7-day forecast with confidence intervals |
-| *"Which stores are likely to underperform?"* | Risk scoring based on trend + forecast |
-| *"How have promotions performed for Store 35?"* | Promo uplift analysis, SHAP feature contribution |
-| *"Which of my 5 stores should I focus on?"* | Multi-store Decision Intelligence report |
-
-Every answer is **grounded in real data** — the AI never fabricates numbers.
-
-The system follows the **ANALYZE → PREDICT → EXPLAIN → RECOMMEND** framework:
-
-```
-📊 ANALYZE        📈 PREDICT        💡 EXPLAIN        ✅ RECOMMEND
-Historical EDA  →  7-day XGBoost  →  SHAP drivers  →  Action + Evidence
-```
+| *"What sales can I expect next week?"* | LightGBM 7-day forecast with confidence intervals |
+| *"Why does the model predict this number?"* | SHAP waterfall — step-by-step explanation in euros |
+| *"What if I run a promotion next week?"* | What-If simulator flips a promo toggle, re-runs forecast |
+| *"Which of my 5 stores needs attention most?"* | AI agent ranks all stores by risk, evidence, and opportunity |
+| *"Is my fleet healthy?"* | Fleet Health Score (0–100) combining accuracy + promo uplift |
 
 ---
 
 ## 👥 Team
 
-| Name | Role | Responsible For |
-|------|------|----------------|
-| **Parvat** | Team Lead & Integration | `app.py`, `config.py`, system integration, tests |
-| **Himanshu** | Data Engineer & EDA | `data_pipeline.py`, `database.py`, EDA notebook |
-| **Ashutosh** | ML & Explainability | `model_engine.py`, XGBoost, SHAP |
-| **Saumya** | Agentic AI & Decision | `agent_graph.py`, `decision_engine.py`, LLM prompts |
-| **Dikshit** | Frontend & UI | All Streamlit pages, charts, components |
+| Person | Role | Owns |
+|--------|------|------|
+| **Parvat** *(Lead)* | Integration & Testing | `app.py`, `config.py`, `tests/test_curveball.py`, README |
+| **Himanshu** | Data Engineer | `src/data_pipeline.py`, `src/database.py`, `notebooks/eda.ipynb` |
+| **Ashutosh** | ML Engineer | `src/model_engine.py`, `src/feature_engineering.py` |
+| **Saumya** | AI/Agent Engineer | `src/agent_graph.py`, `src/decision_engine.py`, `src/prompts.py`, guardrails |
+| **Dikshit** | Frontend | All 5 Streamlit pages in `pages/` |
 
 ---
 
 ## ✨ Features
 
-### 📊 Performance Dashboard
-- Fleet-wide KPI cards (total sales, average daily, top/bottom store)
-- Sales trend charts across time periods
-- Store type (A/B/C/D) performance comparison
-- Holiday impact analysis
-- Anomaly detection — flags stores with unusual sales behaviour
-- Store clustering — groups stores by behavioural similarity
+### 📊 Analytics Dashboard
+- Fleet-wide KPI cards (total stores, avg daily sales, best/worst performer)
+- 🩺 **Fleet Health Score** — animated ring gauge (0–100), computed from model accuracy + promo uplift
+- 📉 **Worst Day of the Week** — auto-detected from real SQL query with action tip
+- 🔔 **Sales Drop Alert Simulation** — configure store, threshold, and email; shows confirmation toast
+- Multi-store sales trend, ranking bar charts, store type breakdown
+- Anomaly detection timeline + promo history deep-dive
 
-### 📈 Sales Forecasting
-- **7-day forecast** for any of the 1,115 stores
-- **Confidence interval bands** (10th–90th percentile)
-- Comparison: Moving Average baseline vs XGBoost vs LightGBM
-- **SHAP waterfall chart** — explains exactly why each prediction was made
-- **What-If Simulator** — toggle a promotion on/off and see how sales change
+### 📈 Forecasting
+- 7-day LightGBM forecast with confidence bands per store
+- 🎯 **Forecast accuracy badge** — color-coded % accuracy in the KPI row
+- 🎚️ **Animated confidence meter** — bar fills from 0 → computed confidence on page load
+- SHAP driver bar + waterfall chart — explains forecast in real euros
+- **What-If Simulator** — promo toggle re-runs forecast instantly
+- 🏆 **Best day to run a promotion calendar** — 7-day heat-strip showing promo uplift per day
 
 ### 🔍 Promotion Analysis
-- Promo vs non-promo sales uplift per store
 - Fleet-wide promo uplift ranking
-- Store type breakdown of promotional effectiveness
-- Promo activity timeline
+- Store-type breakdown of promo effectiveness
+- Single-store promo deep-dive with timeline
+- Downloadable promo activity table
 
 ### 🤖 AI Assistant
-- Natural language questions in plain English
-- Structured responses: **Observation → Prediction → Evidence → Recommendation**
-- **Streaming responses** (real-time, like ChatGPT)
-- **Citation cards** — every fact shows which data source it came from
-- Session conversation history
-- Example question chips for quick exploration
+- Natural language → structured Observation / Prediction / Evidence / Recommendation
+- 🎤 **Live voice input** — speak your question, it transcribes and submits automatically
+- ⚡ **Response time badge** — shows answered-in time, persists in chat history
+- Streaming response with live elapsed timer
+- Citation cards showing every data source used
+- Example question chips + "Surprise Me" style prompts
+- Guardrails prevent hallucination — all numbers grounded in tool results
 
 ### ⚙️ Model Performance
-- RMSPE, MAE, R² metrics
-- Walk-forward cross-validation results
-- Baseline vs ML model comparison
-- Global SHAP feature importance (beeswarm)
+- RMSPE, MAE, R² for LightGBM, XGBoost, and Baseline
+- Walk-forward cross-validation diagram
+- Model comparison chart and downloadable metrics table
 
 ---
 
-## 🛠️ Tech Stack
+## 🏗 Tech Stack
 
-| Category | Technology | Purpose |
-|----------|-----------|---------|
-| **Language** | Python 3.11 | Core language |
-| **Data** | Pandas, NumPy | Data manipulation |
-| **Database** | SQLite + SQLAlchemy | Local analytical store |
-| **ML** | XGBoost, LightGBM, scikit-learn | Forecasting models |
-| **Explainability** | SHAP | Feature attribution |
-| **AI Agent** | LangGraph | Agent orchestration |
-| **LLM** | OpenRouter (Llama 3 / Claude) | Natural language responses |
-| **App** | Streamlit | Web interface |
-| **Charts** | Plotly | Interactive visualisations |
-| **Testing** | pytest | Automated tests |
+| Layer | Technology |
+|-------|-----------|
+| **UI** | Streamlit 1.35+ |
+| **Primary ML Model** | LightGBM (RMSPE ≈ 0.12) |
+| **Secondary ML Model** | XGBoost (comparison) |
+| **Explainability** | SHAP |
+| **AI Agent** | LangGraph + OpenRouter LLM |
+| **Database** | SQLite (via SQLAlchemy) |
+| **Visualisation** | Plotly |
+| **Voice Input** | streamlit-mic-recorder + SpeechRecognition |
+| **Testing** | pytest (288 tests, all passing) |
+| **Container** | Docker + Docker Compose |
 
 ---
 
@@ -125,234 +122,177 @@ Historical EDA  →  7-day XGBoost  →  SHAP drivers  →  Action + Evidence
 
 ```
 capstone/
-│
-├── app.py                        # Main entry point — run this to start the app
-├── config.py                     # All shared constants (paths, model names, LLM config)
-├── requirements.txt              # All Python dependencies
-├── setup.sh                      # One-command environment setup
-├── .env.example                  # Template for your API key
-│
-├── data/
-│   ├── train.csv                 # Raw Rossmann training data (1M+ rows)
-│   ├── store.csv                 # Store characteristics (1115 stores)
-│   ├── retail.db                 # Generated SQLite database (created by setup)
-│   └── mocks/                    # Mock data files (for development)
-│
-├── src/
-│   ├── data_pipeline.py          # Cleans data, engineers features, populates SQLite
-│   ├── database.py               # All database query functions
-│   ├── feature_engineering.py    # Lag, rolling, calendar features
-│   ├── model_engine.py           # Train, forecast, SHAP, What-If
-│   ├── agent_graph.py            # LangGraph agent definition
-│   ├── decision_engine.py        # Observation → Recommendation logic
-│   ├── prompts.py                # LLM system prompts
-│   └── utils.py                  # Shared utility functions
+├── app.py                        # Streamlit entry point
+├── config.py                     # All paths + feature flags
+├── Dockerfile                    # One-command container build
+├── docker-compose.yml            # docker compose up --build
+├── CONTRIBUTING.md               # How to add new store types etc.
 │
 ├── pages/
-│   ├── 1_🏠_Dashboard.py
-│   ├── 2_📈_Forecasting.py
-│   ├── 3_🔍_Promotion_Analysis.py
-│   ├── 4_🤖_AI_Assistant.py
-│   └── 5_⚙️_Model_Performance.py
+│   ├── 1_🏠_Dashboard.py         # Fleet analytics + health score + alerts
+│   ├── 2_📈_Forecasting.py       # 7-day forecast + SHAP + promo calendar
+│   ├── 3_🔍_Promotion_Analysis.py# Uplift ranking + deep-dive
+│   ├── 4_🤖_AI_Assistant.py      # Streaming chat + voice input
+│   └── 5_⚙️_Model_Performance.py # Metrics + CV diagram
+│
+├── src/
+│   ├── data_pipeline.py          # ETL — cleans CSV, writes retail.db
+│   ├── database.py               # All SQL query functions (single source of truth)
+│   ├── feature_engineering.py    # Lag features, rolling stats, promo flags
+│   ├── model_engine.py           # Forecast, SHAP, What-If, metrics functions
+│   ├── agent_graph.py            # LangGraph AI agent (Router → Tools → Decision)
+│   ├── decision_engine.py        # Obs/Prediction/Evidence/Recommendation builder
+│   ├── prompts.py                # System prompts for the LLM
+│   ├── guardrails.py             # Anti-hallucination + scope enforcement
+│   ├── validation.py             # Response structure validation
+│   └── query_understanding.py    # Intent classification + entity extraction
 │
 ├── components/
-│   ├── charts.py                 # Reusable Plotly chart functions
-│   ├── ui_helpers.py             # Reusable Streamlit widgets
-│   └── report_generator.py       # CSV/PDF export
+│   ├── charts.py                 # Shared Plotly chart functions
+│   └── ui_helpers.py             # kpi_card, section_header, citation_card, etc.
 │
-├── models/
-│   ├── xgboost_model.pkl         # Trained XGBoost model (generated by setup)
-│   ├── lgbm_model.pkl            # Trained LightGBM model
-│   └── shap_explainer.pkl        # SHAP explainer object
-│
-├── tests/
-│   ├── conftest.py               # Shared test fixtures
-│   ├── test_data_pipeline.py
-│   ├── test_database.py
-│   ├── test_model_engine.py
-│   ├── test_agent_graph.py
-│   ├── test_decision_engine.py
-│   └── test_curveball.py         # Presentation stress test (20 runs)
-│
-├── notebooks/
-│   ├── eda.ipynb                 # Full exploratory data analysis
-│   ├── feature_analysis.ipynb    # Feature engineering rationale
-│   └── model_experiments.ipynb   # Model comparison and selection
-│
-└── docs/
-    ├── architecture.md           # Full system architecture (this project's design doc)
-    ├── data_assumptions.md       # Data cleaning decisions
-    ├── model_report.md           # ML model selection and metrics
-    └── agent_design.md           # Agent architecture and prompt engineering
+├── tests/                        # 288 tests across 9 test files
+├── models/                       # Trained .pkl files (lgbm, xgboost, shap, medians)
+├── data/                         # train.csv, store.csv → retail.db (not committed)
+├── docs/                         # architecture.md, model_report.md, agent_design.md
+└── notebooks/eda.ipynb           # Exploratory data analysis (9+ analyses)
 ```
 
 ---
 
-## ⚡ Quick Start
-
-### Prerequisites
-
-- Python 3.11+
-- The Rossmann dataset files: `train.csv` and `store.csv` in the `data/` folder
-- An [OpenRouter](https://openrouter.ai) API key (free tier available)
-
-### 1. Clone the Repository
+## 🐳 Quick Start — Docker (One Command)
 
 ```bash
-git clone https://github.com/your-team/retail-ai-capstone.git
-cd retail-ai-capstone
+# Clone
+git clone https://github.com/parvatkhattak/AI-Powered-Retail-Sales-Forecasting-Decision-Intelligence.git
+cd AI-Powered-Retail-Sales-Forecasting-Decision-Intelligence
+
+# Copy env and add your OpenRouter API key
+cp .env.example .env
+# edit .env → set OPENROUTER_API_KEY=sk-or-...
+
+# Place your data files
+# data/train.csv  (from Kaggle Rossmann dataset)
+# data/store.csv
+
+# Build and run — everything else is automatic
+docker compose up --build
 ```
 
-### 2. Set Up Environment (One Command)
+**App is live at `http://localhost:8501`**
+
+The container will automatically:
+1. Install all Python dependencies
+2. Run `data_pipeline.py` to build `retail.db` if it doesn't exist
+3. Start Streamlit on port 8501
+
+> **Volume mount:** `./data` is mounted into the container, so `retail.db` survives rebuilds.
+
+---
+
+## 💻 Quick Start — Local
 
 ```bash
-bash setup.sh
-```
+# 1. Clone & install
+git clone https://github.com/parvatkhattak/AI-Powered-Retail-Sales-Forecasting-Decision-Intelligence.git
+cd AI-Powered-Retail-Sales-Forecasting-Decision-Intelligence
+pip install -r requirements.txt
 
-This script will:
-- Create a Python virtual environment
-- Install all dependencies from `requirements.txt`
-- Copy `.env.example` to `.env`
+# 2. Configure
+cp .env.example .env
+# Set OPENROUTER_API_KEY in .env
 
-### 3. Add Your API Key
+# 3. Place Rossmann data files in data/
+#    data/train.csv  and  data/store.csv
 
-Open the `.env` file and add your OpenRouter API key:
-
-```bash
-OPENROUTER_API_KEY=your_key_here
-```
-
-> **No key?** Get a free one at [openrouter.ai](https://openrouter.ai). The free tier includes access to Llama 3.
-
-### 4. Build the Database and Train the Model
-
-```bash
-# Step 1: Clean data and populate SQLite database
+# 4. Build the database
 python src/data_pipeline.py
 
-# Step 2: Train the forecasting model and compute SHAP values
-python src/model_engine.py --train
-```
+# 5. Train models (or use pre-trained .pkl files if committed)
+python compare_models.py
 
-> ⏱️ **Expected times:** Database build ~3–5 min | Model training ~5–10 min
-
-### 5. Launch the App
-
-```bash
+# 6. Run
 streamlit run app.py
 ```
-
-Open your browser at **http://localhost:8501** 🎉
-
----
-
-## 🖥️ How to Run
-
-### Run the Full Pipeline (fresh install)
-
-```bash
-# Activate virtual environment
-source venv/bin/activate          # macOS/Linux
-venv\Scripts\activate             # Windows
-
-# Build everything
-python src/data_pipeline.py
-python src/model_engine.py --train
-
-# Start the app
-streamlit run app.py
-```
-
-### Just Start the App (database + model already built)
-
-```bash
-source venv/bin/activate
-streamlit run app.py
-```
-
-### Run the EDA Notebook
-
-```bash
-jupyter notebook notebooks/eda.ipynb
-```
-
----
-
-## 🧠 How the AI Works
-
-The AI Assistant is built on **LangGraph**, a graph-based agent framework. When you type a question, this is what happens:
-
-```
-Your question
-     │
-     ▼
- Router Node ──► Classifies intent (performance / forecast / recommend / what-if)
-     │
-     ├──► Data Analyst Node ──► Queries SQLite database (real historical sales)
-     │
-     ├──► Forecast Node ──► Runs XGBoost model (real 7-day predictions)
-     │
-     ├──► Decision Node ──► Combines both → Observation → Prediction → Evidence → Recommendation
-     │
-     └──► What-If Node ──► Simulates forecast with/without promotion
-              │
-              ▼
-         LLM receives real data, formats a clear response
-              │
-              ▼
-         Response streams back to you with source citations
-```
-
-### 🔒 Hallucination Prevention
-
-The AI is strictly instructed:
-> *"You may only state numbers that appear in the tool results provided. If a figure is not in the tool results, say 'data not available'. Never estimate or guess."*
-
-Every response includes a **[Sources]** section showing which database queries and model functions provided each piece of data.
 
 ---
 
 ## 📱 Application Pages
 
 ### 🏠 Dashboard
-Your first stop. Shows a bird's-eye view of all 1,115 stores:
-- Total fleet sales, average daily sales, best and worst performing stores
-- Sales trend over time with period selector
-- Store type performance breakdown (A, B, C, D)
-- Anomaly flags — which stores had unusual sales recently?
-- Store clustering map — which stores behave similarly?
+Fleet-wide command centre:
+- **5 KPI cards** — Total stores, Avg daily sales, Total revenue, Top store, Bottom store
+- **🩺 Fleet Health Score** — Ring gauge (0–100) computed from model accuracy + promo uplift
+- **📉 Worst Day of the Week** — Actual SQL result: which day has the lowest fleet avg sales
+- **🔔 Sales Drop Alert** — Set a store, a % threshold, and an email; simulates alert configuration
+- Sales trend, store ranking charts, store type comparison, promo uplift ranking, anomaly detection
 
 ### 📈 Forecasting
-Pick any store and instantly see:
-- 7-day sales forecast with upper/lower confidence bounds
-- Side-by-side comparison: your model vs simple moving average baseline
-- SHAP waterfall chart: *"why does the model predict this number?"*
-- **What-If Simulator:** flip a promo toggle and see the forecast change in real time
+Per-store prediction engine:
+- **Store selector** → triggers 7-day LightGBM forecast with confidence bands
+- **5 KPI cards** including 🎯 Model Accuracy badge
+- **Animated confidence meter** — bar animates to show how tight the forecast interval is
+- **SHAP bar + waterfall** — explains forecast in plain-English euro terms
+- **What-If Simulator** — promo toggle shows impact vs no-promo scenario
+- **🏆 Best promotion day calendar** — 7-day heat strip, trophy on best uplift day
 
 ### 🔍 Promotion Analysis
-Deep dive into promotional effectiveness:
-- Which stores have the highest promotional uplift?
-- How does promo effectiveness differ between store types?
-- Visual comparison of promo vs non-promo periods for any store
-- Timeline of promotional activity
+- Fleet-wide uplift ranking chart
+- Store-type breakdown (A vs B vs C vs D effectiveness)
+- Single-store promo vs non-promo sales comparison
+- Downloadable ranked summary table
 
 ### 🤖 AI Assistant
-Ask anything in plain English. Examples:
-- *"How is Store 125 performing?"*
-- *"Compare Store 125 and Store 220"*
-- *"What are expected sales for Store 100 next week?"*
-- *"Which stores are likely to underperform next week?"*
-- *"How have promotions performed for Store 35?"*
-- *"I manage Stores 100, 200, 300, 400, 500 — which should I focus on?"*
-
-Responses always include: **Observation → Prediction → Evidence → Recommendation**
+- Type **or speak** (🎤 voice input) any question about your stores
+- Real-time streaming answer with live stage indicator and elapsed timer
+- **⚡ Response time badge** — color-coded pill (green <5s, amber <15s, red) persists in history
+- Structured answer: **Observation → Prediction → Evidence → Recommendation**
+- Citation cards showing exactly which database functions and model calls were used
+- Guardrails prevent the LLM from inventing numbers not in tool results
+- Example question chips and "Clear Chat" button
 
 ### ⚙️ Model Performance
-Full transparency on how the forecasting model was built:
-- RMSPE, MAE, R² scores
-- Walk-forward cross-validation results across 5 folds
-- XGBoost vs LightGBM vs Moving Average comparison
-- Global feature importance (which features matter most across all stores?)
+- RMSPE / MAE / R² cards for LightGBM, XGBoost, and Baseline
+- Walk-forward cross-validation diagram
+- Model comparison grouped bar chart
+- Downloadable metrics table
+
+---
+
+## 🤖 How the AI Works
+
+```
+User types or speaks a question
+           │
+    app.py (Streamlit)
+           │
+    query_understanding.py ── intent classification + entity extraction
+           │
+    guardrails.py ──────────── scope check (retail only)
+           │
+    agent_graph.py (LangGraph)
+           │
+    ┌──────┴──────┐
+    │             │
+database.py   model_engine.py
+(SQLite)      (LightGBM + SHAP)
+    │             │
+    └──────┬──────┘
+           │
+    decision_engine.py ─── builds Obs/Pred/Evidence/Rec
+           │
+    response_validation.py ─ checks output is grounded
+           │
+    Streamed back to the user with citation cards
+```
+
+### 🔒 Hallucination Prevention
+
+Every number in a response must come from an actual tool result. The system enforces:
+- All figures traced back to `database.py` or `model_engine.py` outputs
+- `guardrails.py` blocks out-of-scope questions before the LLM runs
+- `response_validation.py` verifies the answer structure before display
+- Every response includes a **Sources:** section listing the exact functions called
 
 ---
 
@@ -362,91 +302,78 @@ Full transparency on how the forecasting model was built:
 
 | File | Rows | Description |
 |------|------|-------------|
-| `train.csv` | ~1,017,209 | Daily sales for 1,115 stores over 3 years |
+| `train.csv` | ~1,017,209 | Daily sales for 1,115 stores (Jan 2013 – Jul 2015) |
 | `store.csv` | 1,115 | Store attributes: type, competition, promotions |
 
-### Key Fields Used
+### Key Fields
 
 | Field | Source | Used For |
 |-------|--------|---------|
-| `Sales` | train.csv | Target variable for forecasting |
-| `Promo` | train.csv | Promotional analysis |
-| `StateHoliday` | train.csv | Holiday impact analysis |
-| `StoreType` | store.csv | Store segmentation |
-| `CompetitionDistance` | store.csv | Competition impact analysis |
-| `Promo2` | store.csv | Continuous promotion tracking |
-
-> The dataset covers **January 2013 – July 2015**. Forecasts are relative to the dataset's end date.
+| `Sales` | train.csv | Forecast target variable |
+| `Promo` | train.csv | Promotional analysis + What-If |
+| `StoreType` | store.csv (joined) | Store segmentation, type breakdown |
+| `CompetitionDistance` | store.csv | Competition impact in SHAP |
+| `Promo2` / `IsPromo2Active` | store.csv | Continuous promo tracking |
+| `DayOfWeek` | train.csv | Worst-day-of-week analysis |
 
 ---
 
 ## 🧪 Running Tests
 
-### Run All Tests
-
 ```bash
-pytest tests/ -v
-```
+# Run all 288 tests
+pytest tests/ -q
 
-### Run a Specific Test File
-
-```bash
-pytest tests/test_database.py -v
+# Run a specific file
 pytest tests/test_model_engine.py -v
-pytest tests/test_agent_graph.py -v
-```
+pytest tests/test_database.py -v
+pytest tests/test_curveball.py -v -s    # presentation stress test
 
-### Run the Presentation Stress Test
-
-```bash
-pytest tests/test_curveball.py -v -s
-```
-
-This runs the live curveball question 20 times and verifies:
-- ✅ Zero crashes
-- ✅ Consistent store ranking (#1 ranked store appears in ≥18/20 runs)
-- ✅ Response time < 30 seconds per query
-- ✅ No hallucinated numbers in any response
-
-### Check Test Coverage
-
-```bash
+# Coverage report
 pytest tests/ --cov=src --cov-report=term-missing
 ```
+
+### Test Files
+
+| File | Covers |
+|------|--------|
+| `test_data_pipeline.py` | ETL, no nulls, no data leakage in lags |
+| `test_database.py` | All 8 DB functions — column names, types, values |
+| `test_model_engine.py` | Forecast (7 rows), SHAP structure, What-If, metrics |
+| `test_agent_graph.py` | Agent doesn't crash, response has 4 sections |
+| `test_decision_engine.py` | Decision report has all fields, citations non-empty |
+| `test_guardrails.py` | Out-of-scope queries blocked, in-scope allowed |
+| `test_query_understanding.py` | Intent classification, entity extraction, follow-ups |
+| `test_agent_behaviour.py` | End-to-end agent behaviour scenarios |
+| `test_curveball.py` | 20× stress test of the live presentation question |
 
 ---
 
 ## 🎯 The Curveball Question
 
-> *"I manage Stores 100, 200, 300, and 500. Based on historical performance and your forecast, which stores should I focus on next week, why, and what does their promotional history tell me?"*
+> *"I manage Stores 100, 200, 300, 400, and 500. Based on historical performance and your forecast, which stores should I focus on next week, why, and what does their promotional history tell me?"*
 
-This is the live demonstration question. The system handles it by:
-
-1. Extracting store IDs `[100, 200, 300, 400, 500]` from the query
-2. Fetching 30 days of historical sales for all 5 stores
-3. Running the 7-day XGBoost forecast for each store
-4. Fetching promotional uplift history for each store
-5. Ranking stores by composite risk score (trend decline + forecast weakness + unused promo potential)
-6. Returning a structured decision report:
+The agent automatically:
+1. Extracts `[100, 200, 300, 400, 500]` from the question
+2. Fetches 30-day historical sales for all 5 stores
+3. Runs the 7-day LightGBM forecast for each
+4. Fetches promotional uplift history for each
+5. Ranks by composite risk score (declining trend + weak forecast + unused promo potential)
+6. Returns a structured response:
 
 ```
 🔍 OBSERVATION
-Store 200 has seen an 18% sales decline over the past 4 weeks,
-the steepest fall in this group.
+Store 200 has seen an 18% sales decline over the past 4 weeks.
 
 📈 PREDICTION
-The model forecasts Store 200 will average €9,200/day next week
-— 14% below the group average of €10,700/day.
+Our model forecasts Store 200 at €9,200/day next week — 14% below fleet average.
 
 📊 EVIDENCE
-SHAP analysis shows promotional activity contributes +31% to
-Store 200's sales on promo days. Store 200 has had 0 promo days
-in the past 3 weeks.
+SHAP shows promotional activity contributes +31% uplift for Store 200 on promo days.
+Store 200 has had 0 promo days in the past 3 weeks.
 
 ✅ RECOMMENDATION
-Priority: Store 200. Activating Promo 1 next week is strongly
-supported by historical data. All other stores show stable or
-improving trends.
+Activate Promo 1 for Store 200 next week. Historical data strongly supports this.
 
 📚 Sources: database.get_store_metrics, model_engine.get_7day_forecast,
             database.get_promo_history
@@ -458,66 +385,44 @@ improving trends.
 
 | Limitation | Details |
 |------------|---------|
-| **Dataset period** | Data ends July 2015 — forecasts are simulated, not live |
-| **Local only** | Designed to run on a laptop; not production-scaled |
-| **7-day horizon** | Model is not reliable beyond 7-day forecasts |
-| **LLM speed** | AI responses may take 10–20 seconds depending on the LLM |
-| **SQLite concurrency** | Single-user only — SQLite doesn't support concurrent writes |
+| **Dataset ends July 2015** | Forecasts are simulated, not live |
+| **SQLite concurrency** | Single-user only — not for concurrent production use |
+| **7-day horizon** | Model unreliable beyond 7 days without additional long-horizon features |
+| **LLM latency** | AI responses take 5–20s depending on OpenRouter load |
+| **Voice input** | Requires browser microphone permission; works in Chrome/Edge |
 
 ---
 
 ## 📚 Documentation
 
-| Document | Location | Description |
-|----------|----------|-------------|
-| System Architecture | [`docs/architecture.md`](docs/architecture.md) | Full technical design, diagrams, data model |
-| Team Work Plan | [`TEAM_PLAN.md`](TEAM_PLAN.md) | Sprint plan, roles, daily tasks |
-| Data Assumptions | [`docs/data_assumptions.md`](docs/data_assumptions.md) | Every data cleaning decision |
-| Model Report | [`docs/model_report.md`](docs/model_report.md) | ML model selection, metrics, SHAP guide |
-| Agent Design | [`docs/agent_design.md`](docs/agent_design.md) | LangGraph architecture, prompt engineering |
+| Document | Description |
+|----------|-------------|
+| [`docs/architecture.md`](docs/architecture.md) | Full technical design, module graph, data model, API contracts |
+| [`docs/model_report.md`](docs/model_report.md) | Model selection, walk-forward CV, SHAP guide |
+| [`docs/agent_design.md`](docs/agent_design.md) | LangGraph graph, guardrails, prompt engineering |
+| [`docs/data_assumptions.md`](docs/data_assumptions.md) | Every data cleaning decision |
+| [`docs/architecture_diagram.jpg`](docs/architecture_diagram.jpg) | Visual system architecture diagram |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to add new store types, branching, PR checklist |
+| [`TEAM_PLAN.md`](TEAM_PLAN.md) | Sprint plan, roles, daily task breakdown |
 
 ---
 
-## 🤝 Contributing (Team Members)
+## 🤝 Contributing
 
-### Branch Naming
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide, including a detailed **8-step walkthrough for adding a new store type**.
 
+Quick summary:
 ```bash
-git checkout -b feature/data-pipeline    # Himanshu
-git checkout -b feature/ml-engine        # Ashutosh
-git checkout -b feature/agent-router     # Saumya
-git checkout -b feature/streamlit-ui     # Dikshit
+git checkout -b feature/<your-feature>
+# make changes
+pytest tests/ -q          # must pass
+git push origin feature/<your-feature>
+# open a PR → tag Parvat for review
 ```
-
-### Before Raising a PR
-
-```bash
-# Run your tests
-pytest tests/test_<your_module>.py -v
-
-# Check for import errors
-python -c "from src.<your_module> import *; print('OK')"
-```
-
-### Never Change a Shared Function Signature Without Asking Parvat First
-
-The following functions are called by multiple team members. Changing them without coordination will break everyone's code:
-
-- `database.get_store_metrics()`
-- `database.get_promo_history()`
-- `model_engine.get_7day_forecast()`
-- `model_engine.get_shap_explanations()`
-- `agent_graph.run_agent_stream()`
-
----
-
-## 📝 License
-
-This project was built as an academic capstone. Dataset sourced from [Rossmann Store Sales on Kaggle](https://www.kaggle.com/c/rossmann-store-sales).
 
 ---
 
 <div align="center">
-  <strong>Built by Team Retail AI · Capstone 2025</strong><br/>
+  <strong>Built by Team Retail AI · Capstone 2026</strong><br/>
   <em>Analyze · Predict · Explain · Recommend</em>
 </div>
