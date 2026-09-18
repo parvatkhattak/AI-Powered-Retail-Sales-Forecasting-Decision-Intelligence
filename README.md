@@ -2,11 +2,12 @@
 
 > **An AI-powered platform that helps retail store managers analyze performance, predict future sales, and receive evidence-backed recommendations — all through a natural language interface.**
 
-[![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-red?logo=streamlit)](https://streamlit.io)
 [![LightGBM](https://img.shields.io/badge/LightGBM-Primary_Model-green)](https://lightgbm.readthedocs.io)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0+-orange)](https://xgboost.readthedocs.io)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agent-purple)](https://langchain-ai.github.io/langgraph/)
+[![Observability](https://img.shields.io/badge/Observability-FinOps%20%2B%20Monitoring-informational)](src/observability.py)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com)
 [![Tests](https://img.shields.io/badge/Tests-288_passing-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
@@ -25,6 +26,7 @@
 - [Quick Start — Local](#-quick-start--local)
 - [Application Pages](#-application-pages)
 - [How the AI Works](#-how-the-ai-works)
+- [Observability & FinOps](#-observability--finops)
 - [Dataset](#-dataset)
 - [Running Tests](#-running-tests)
 - [The Curveball Question](#-the-curveball-question)
@@ -53,11 +55,11 @@ This platform answers real business questions for a retail manager who operates 
 
 | Person | Role | Owns |
 |--------|------|------|
-| **Parvat** *(Lead)* | Integration & Testing | `app.py`, `config.py`, `tests/test_curveball.py`, README |
+| **Parvat** *(Lead)* | Integration, Testing & Observability | `app.py`, `config.py`, `src/observability.py`, `pages/6_📡_Observability.py`, `tests/test_curveball.py`, README |
 | **Himanshu** | Data Engineer | `src/data_pipeline.py`, `src/database.py`, `notebooks/eda.ipynb` |
 | **Ashutosh** | ML Engineer | `src/model_engine.py`, `src/feature_engineering.py` |
 | **Saumya** | AI/Agent Engineer | `src/agent_graph.py`, `src/decision_engine.py`, `src/prompts.py`, guardrails |
-| **Dikshit** | Frontend | All 5 Streamlit pages in `pages/` |
+| **Dikshit** | Frontend | All Streamlit pages in `pages/` |
 
 ---
 
@@ -99,6 +101,14 @@ This platform answers real business questions for a retail manager who operates 
 - Walk-forward cross-validation diagram
 - Model comparison chart and downloadable metrics table
 
+### 📡 Observability & FinOps
+- **System health dashboard** — live status badges for DB, ML models, LLM API key, runtime
+- **Session KPIs** — LLM calls, total tokens, estimated cost (USD), avg latency, error count
+- **FinOps log** — per-call token breakdown (prompt + completion) with stacked bar chart
+- **Latency trend chart** — `forecast_7day`, `forecast_shap`, `agent` latency over time
+- **Error log** — captured exceptions with timestamps
+- **Structured log tail** — last N lines of `logs/app.log` in JSON format with raw JSON expander
+
 ---
 
 ## 🏗 Tech Stack
@@ -113,6 +123,9 @@ This platform answers real business questions for a retail manager who operates 
 | **Database** | SQLite (via SQLAlchemy) |
 | **Visualisation** | Plotly |
 | **Voice Input** | streamlit-mic-recorder + SpeechRecognition |
+| **Observability** | `src/observability.py` — structured JSON logging, `@timed` decorator, token tracking |
+| **Monitoring** | Latency trends, error log, health checks — live in `pages/6_📡_Observability.py` |
+| **FinOps** | Per-call token counts + USD cost estimates logged to `logs/finops.jsonl` |
 | **Testing** | pytest (288 tests, all passing) |
 | **Container** | Docker + Docker Compose |
 
@@ -133,7 +146,8 @@ capstone/
 │   ├── 2_📈_Forecasting.py       # 7-day forecast + SHAP + promo calendar
 │   ├── 3_🔍_Promotion_Analysis.py# Uplift ranking + deep-dive
 │   ├── 4_🤖_AI_Assistant.py      # Streaming chat + voice input
-│   └── 5_⚙️_Model_Performance.py # Metrics + CV diagram
+│   ├── 5_⚙️_Model_Performance.py # Metrics + CV diagram
+│   └── 6_📡_Observability.py     # Live monitoring: health, FinOps, latency, logs
 │
 ├── src/
 │   ├── data_pipeline.py          # ETL — cleans CSV, writes retail.db
@@ -145,11 +159,17 @@ capstone/
 │   ├── prompts.py                # System prompts for the LLM
 │   ├── guardrails.py             # Anti-hallucination + scope enforcement
 │   ├── validation.py             # Response structure validation
-│   └── query_understanding.py    # Intent classification + entity extraction
+│   ├── query_understanding.py    # Intent classification + entity extraction
+│   └── observability.py          # Structured logging, @timed, FinOps, health checks
 │
 ├── components/
 │   ├── charts.py                 # Shared Plotly chart functions
 │   └── ui_helpers.py             # kpi_card, section_header, citation_card, etc.
+│
+├── logs/                         # Runtime logs (gitignored)
+│   ├── app.log                   # Structured JSON rotating log
+│   ├── finops.jsonl              # Per-LLM-call token + cost records
+│   └── metrics.jsonl             # Per-function latency events
 │
 ├── tests/                        # 288 tests across 9 test files
 ├── models/                       # Trained .pkl files (lgbm, xgboost, shap, medians)
@@ -256,6 +276,59 @@ Per-store prediction engine:
 - Walk-forward cross-validation diagram
 - Model comparison grouped bar chart
 - Downloadable metrics table
+
+### 📡 Observability
+- **System health badges** — DB, ML models, LLM API key, log directory, Python runtime
+- **Session KPIs** — total LLM calls, tokens consumed, estimated cost, avg latency, error count
+- **FinOps panel** — token usage stacked bar chart, per-call breakdown table with query previews
+- **Latency trend chart** — time-series of `forecast_7day`, `forecast_shap`, `agent` response times
+- **Error log table** — every caught exception with timestamp and event context
+- **Structured log tail** — live last-N lines from `logs/app.log` with raw JSON expander
+- 🔄 Manual refresh button; all data updates on each click
+
+---
+
+## 📡 Observability & FinOps
+
+The platform ships with a built-in observability layer (`src/observability.py`) that instruments the entire app with **zero impact on existing functionality**.
+
+### What is tracked
+
+| Signal | Where recorded | How |
+|--------|---------------|-----|
+| **Structured logs** | `logs/app.log` | Rotating JSON lines (5 MB × 3 backups) |
+| **LLM token usage** | `logs/finops.jsonl` | Prompt + completion tokens per call |
+| **LLM cost estimate** | `logs/finops.jsonl` | USD cost from OpenRouter pricing table |
+| **Forecast latency** | `logs/metrics.jsonl` | `@timed` on `get_7day_forecast()` + `get_shap_explanations()` |
+| **Health status** | In-memory + UI | DB, models, API key, log dir, Python runtime |
+| **Errors** | In-memory + UI | Any caught exception recorded with context |
+
+### How it is implemented
+
+```python
+# Decorating a function — zero change to its signature or return value
+@timed("forecast_7day")
+def get_7day_forecast(store_id: int) -> pd.DataFrame:
+    ...
+
+# After each LLM call — token counts from response.usage_metadata
+record_llm_call(
+    model="meta-llama/llama-3.3-70b-instruct:free",
+    prompt_tokens=310, completion_tokens=145,
+    latency_ms=842, status="ok", query_preview="Which store..."
+)
+```
+
+### FinOps cost table
+
+| Model | Prompt ($/1M tok) | Completion ($/1M tok) |
+|-------|-------------------|-----------------------|
+| `meta-llama/llama-3.3-70b-instruct:free` | $0.00 | $0.00 |
+| `openai/gpt-4o-mini` | $0.15 | $0.60 |
+| `openai/gpt-4o` | $5.00 | $15.00 |
+| `anthropic/claude-3-haiku` | $0.25 | $1.25 |
+
+> Free-tier models are $0 — but token volume is always tracked so you can switch models without losing cost visibility.
 
 ---
 
@@ -390,6 +463,7 @@ Activate Promo 1 for Store 200 next week. Historical data strongly supports this
 | **7-day horizon** | Model unreliable beyond 7 days without additional long-horizon features |
 | **LLM latency** | AI responses take 5–20s depending on OpenRouter load |
 | **Voice input** | Requires browser microphone permission; works in Chrome/Edge |
+| **Observability in-memory only** | Metrics reset on app restart; for persistence across restarts, read `logs/*.jsonl` directly |
 
 ---
 
@@ -402,6 +476,7 @@ Activate Promo 1 for Store 200 next week. Historical data strongly supports this
 | [`docs/agent_design.md`](docs/agent_design.md) | LangGraph graph, guardrails, prompt engineering |
 | [`docs/data_assumptions.md`](docs/data_assumptions.md) | Every data cleaning decision |
 | [`docs/architecture_diagram.jpg`](docs/architecture_diagram.jpg) | Visual system architecture diagram |
+| [`src/observability.py`](src/observability.py) | Observability module — logging, timing, FinOps, health checks |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to add new store types, branching, PR checklist |
 | [`TEAM_PLAN.md`](TEAM_PLAN.md) | Sprint plan, roles, daily task breakdown |
 

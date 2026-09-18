@@ -13,31 +13,33 @@
 │   Types a question  ──or──  Speaks via microphone 🎤               │
 └────────────────────────────┬────────────────────────────────────────┘
                              │  HTTP / WebSocket
-                             ▼
+                             │
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Streamlit Web App  (app.py)                      │
+│  [init_observability() called here on every startup]                │
 │                                                                     │
-│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌────────┐ ┌──────────┐  │
-│  │Dashboard │ │Forecasting│ │Promotion │ │AI Chat │ │ Model    │  │
-│  │ Page 1   │ │  Page 2   │ │ Page 3   │ │ Page 4 │ │ Perf. 5  │  │
-│  └──────────┘ └───────────┘ └──────────┘ └───┬────┘ └──────────┘  │
-└──────────────────────────────────────────────┼─────────────────────┘
-                                               │ run_agent()
-                                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                   AI Agent Layer  (src/)                            │
-│                                                                     │
-│  query_understanding.py ── intent + entity extraction               │
-│           │                                                         │
-│  guardrails.py ──────────── scope check (retail only)              │
-│           │                                                         │
-│  agent_graph.py (LangGraph)                                         │
-│      Router Node → [Data Analyst | Forecast | Decision | What-If]  │
-│           │                                                         │
-│  decision_engine.py ───── Obs / Prediction / Evidence / Rec        │
-│           │                                                         │
-│  response_validation.py ── grounding check before display          │
-└──────────┬───────────────────────────────────────────────┬─────────┘
+│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌────────┐ ┌──────────┐ ┌─────────┐  │
+│  │Dashboard │ │Forecasting│ │Promotion │ │AI Chat │ │ Model    │ │Observ. │  │
+│  │ Page 1   │ │  Page 2   │ │ Page 3   │ │ Page 4 │ │ Perf. 5  │ │Page 6  │  │
+│  └──────────┘ └───────────┘ └──────────┘ └───┬────┘ └──────────┘ └────┬───┘  │
+└────────────────────────────────────────────┬─────────────────────┬───┘
+                             │ run_agent()         │ reads obs metrics
+                             │                     │
+                             ▼                     ▼
+┌─────────────────────────────────────────────────────────────────────┐ ┌───────────────────┐
+│                   AI Agent Layer  (src/)                            │ │ src/              │
+│                                                                     │ │ observability.py  │
+│  query_understanding.py ── intent + entity extraction               │ │                   │
+│           │                                                         │ │ @timed decorator  │
+│  guardrails.py ──────────── scope check (retail only)              │ │ record_llm_call() │
+│           │                                                         │ │ run_health_check()│
+│  agent_graph.py (LangGraph)            ▼ record_llm_call()          │ │ get_session_summary│
+│      Router Node → [Data Analyst | Forecast | Decision | What-If]  │ │                   │
+│           │                                                         │ │ logs/             │
+│  decision_engine.py ───── Obs / Prediction / Evidence / Rec        │ │   app.log         │
+│           │                                                         │ │   finops.jsonl    │
+│  response_validation.py ── grounding check before display          │ │   metrics.jsonl   │
+└──────────┬────────────────────────────────────────────┬───────┘ └───────────────────┘
            │ SQL queries                                   │ model calls
            ▼                                               ▼
 ┌──────────────────────┐                    ┌─────────────────────────┐
@@ -66,16 +68,17 @@
 
 | Module | Owner | Responsibility |
 |--------|-------|---------------|
-| `app.py` | Parvat | Streamlit shell, page navigation, sidebar |
-| `config.py` | Parvat | All file paths and environment flags (single source of truth) |
+| `app.py` | Parvat | Streamlit shell, page navigation, sidebar, calls `init_observability()` on startup |
+| `config.py` | Parvat | All file paths, environment flags, `LOG_DIR`, `LOG_LEVEL` |
+| `src/observability.py` | Parvat | Structured JSON logging, `@timed` latency decorator, FinOps token/cost tracking, health checks |
 | `src/data_pipeline.py` | Himanshu | ETL: cleans raw CSVs, runs feature engineering, writes `retail.db` |
 | `src/database.py` | Himanshu | **All** SQL queries — no other file writes SQL |
 | `src/feature_engineering.py` | Ashutosh + Himanshu | Lag columns, rolling stats, promo streak, store clustering |
-| `src/model_engine.py` | Ashutosh | `get_7day_forecast()`, `get_shap_explanations()`, `get_whatif_forecast()`, `get_model_metrics()`, `get_baseline_comparison()` |
-| `src/agent_graph.py` | Saumya | LangGraph graph: Router → Data Analyst → Forecast → Decision → What-If nodes |
+| `src/model_engine.py` | Ashutosh | `get_7day_forecast()` (`@timed`), `get_shap_explanations()` (`@timed`), What-If, metrics, baseline comparison |
+| `src/agent_graph.py` | Saumya | LangGraph graph; `_compose_with_llm()` instrumented with `record_llm_call()` |
 | `src/decision_engine.py` | Saumya | Builds the 4-section structured response from raw tool results |
 | `src/prompts.py` | Saumya | System prompt, store-type descriptions, tool descriptions |
-| `src/query_understanding.py` | Saumya | Intent classification (`forecast`, `recommend`, `whatif`, `out_of_scope`, …) and entity extraction (store IDs) |
+| `src/query_understanding.py` | Saumya | Intent classification and entity extraction |
 | `src/guardrails.py` | Saumya | Blocks out-of-scope queries before the LLM runs |
 | `src/validation.py` | Saumya | Validates agent input/output structure |
 | `src/response_validation.py` | Saumya | Ensures response is grounded before display |
@@ -86,6 +89,7 @@
 | `pages/3_🔍_Promotion_Analysis.py` | Dikshit | Uplift ranking, type breakdown, store deep-dive |
 | `pages/4_🤖_AI_Assistant.py` | Dikshit + Saumya | Streaming chat, voice input, response time badge |
 | `pages/5_⚙️_Model_Performance.py` | Dikshit + Ashutosh | RMSPE/MAE/R² cards, CV diagram, comparison chart |
+| `pages/6_📡_Observability.py` | Parvat | Health badges, session KPIs, FinOps chart, latency trend, error log, log tail |
 
 ---
 
@@ -164,6 +168,10 @@ data/store.csv  ──┤──► src/data_pipeline.py ──► data/retail.db
 | 🔔 Sales Drop Alert simulation | Dashboard | Streamlit widgets + `st.success` toast |
 | 🐳 Docker setup | Root | `Dockerfile` + `docker-compose.yml` + `.dockerignore` |
 | 📖 CONTRIBUTING.md | Root | 8-step guide for adding new store types |
+| 📡 Observability layer | All pages | `src/observability.py` — structured logging, `@timed`, FinOps, health checks |
+| 📊 FinOps tracking | AI Assistant | Token counts + cost per LLM call written to `logs/finops.jsonl` |
+| ⏱️ Latency instrumentation | Forecasting | `@timed("forecast_7day")` + `@timed("forecast_shap")` decorators |
+| 📡 Observability dashboard | New page 6 | Health badges, KPIs, FinOps chart, latency trends, error log, log tail |
 
 ---
 
@@ -308,6 +316,11 @@ compare_stores_report(store_ids: list[int]) -> dict
 config.py
     ← imported by: all src/ modules, all pages/
 
+src/observability.py                          ← NEW
+    ← imports: logging, json, pathlib, uuid, time, config
+    ← imported by: app.py (init), agent_graph.py (record_llm_call),
+                    model_engine.py (@timed), pages/6 (dashboard)
+
 src/data_pipeline.py
     ← imports: feature_engineering, config
     ← run once: python src/data_pipeline.py
@@ -321,7 +334,7 @@ src/feature_engineering.py
     ← imported by: data_pipeline
 
 src/model_engine.py
-    ← imports: lightgbm, xgboost, shap, joblib, database, config
+    ← imports: lightgbm, xgboost, shap, joblib, database, config, observability
     ← imported by: agent_graph, pages/2, pages/5
 
 src/query_understanding.py
@@ -338,7 +351,8 @@ src/prompts.py
 
 src/agent_graph.py
     ← imports: langgraph, langchain, database, model_engine,
-               decision_engine, prompts, guardrails, query_understanding, config
+               decision_engine, prompts, guardrails, query_understanding,
+               config, observability
     ← imported by: pages/4
 
 src/decision_engine.py
@@ -352,9 +366,15 @@ components/charts.py
 components/ui_helpers.py
     ← imports: streamlit
     ← imported by: all pages
+
+pages/6_📡_Observability.py
+    ← imports: observability (get_session_summary, run_health_check, get_log_tail)
+    ← no dependencies on database or model_engine (pure observability consumer)
 ```
 
 **Circular import rule:** No module may import from a module that imports back from it.
+
+**Observability import safety:** All imports of `src.observability` are wrapped in `try/except`. If the module is unavailable for any reason, a no-op stub is used and all existing functionality continues unchanged.
 
 ---
 
@@ -369,6 +389,7 @@ components/ui_helpers.py
 | 7-day forecast horizon | Unreliable beyond 7 days | Feature set would need longer-lag features |
 | LLM latency (OpenRouter) | 5–20s per response | Streaming + progress indicators handle UX |
 | Voice input browser support | Mic prompt required; best in Chrome | Documented in CONTRIBUTING.md |
+| Observability metrics in-memory | Resets on app restart | Persist across restarts by reading `logs/*.jsonl` directly |
 
 ### Future Improvements
 
@@ -380,6 +401,64 @@ components/ui_helpers.py
 | RAG over promo policy documents | Medium | Cited strategy recommendations |
 | Cloud deployment (GCP / AWS) | High | Production scalability |
 | Multi-user session management | High | Team-wide access |
+| Prometheus + Grafana export | Medium | Production-grade monitoring dashboard |
+| OpenTelemetry tracing | Medium | Distributed trace spans across all nodes |
+
+---
+
+## 12. Observability & FinOps Architecture
+
+### Signal Flow
+
+```
+app.py
+  └── init_observability()           ← creates logs/ dir, sets up rotating JSON handler
+         │
+         ├── src/agent_graph.py
+         │     └── _compose_with_llm()  ← wraps llm.invoke(), calls record_llm_call()
+         │                                  └── writes → logs/finops.jsonl
+         │
+         ├── src/model_engine.py
+         │     ├── @timed("forecast_7day")    ← wraps get_7day_forecast()
+         │     └── @timed("forecast_shap")    ← wraps get_shap_explanations()
+         │                                       └── writes → logs/metrics.jsonl
+         │
+         └── pages/6_📡_Observability.py
+               ├── run_health_check()       ← DB, models, API key, log dir, runtime
+               ├── get_session_summary()    ← aggregates in-memory _metrics dict
+               └── get_log_tail()           ← reads last N lines from logs/app.log
+```
+
+### Log File Formats
+
+**`logs/app.log`** — Structured JSON, one object per line:
+```json
+{"ts": "2026-09-18T09:44:12Z", "level": "INFO", "logger": "observability",
+ "session": "a3f9c1b2", "msg": "llm_call", "model": "meta-llama/llama-3.3-70b-instruct:free",
+ "total_tokens": 455, "cost_usd": 0.0, "latency_ms": 842, "status": "ok"}
+```
+
+**`logs/finops.jsonl`** — One JSON object per LLM call:
+```json
+{"ts": "...", "session": "a3f9c1b2", "model": "...", "prompt_tokens": 310,
+ "completion_tokens": 145, "total_tokens": 455, "cost_usd": 0.0,
+ "latency_ms": 842, "status": "ok", "query_preview": "Which store should I focus on"}
+```
+
+**`logs/metrics.jsonl`** — One JSON object per timed function call:
+```json
+{"ts": "...", "session": "a3f9c1b2", "event": "forecast_7day",
+ "latency_ms": 1243.5, "status": "ok"}
+```
+
+### Design Principles
+
+| Principle | Implementation |
+|-----------|---------------|
+| **Zero side-effects on import** | Nothing starts until `init_observability()` is called |
+| **Fail-silent** | Every public helper is wrapped in `try/except`; observability never crashes the app |
+| **Completely additive** | Existing code works identically if this module is never imported |
+| **No-op fallback** | All `try: import observability` blocks have stub functions as fallbacks |
 
 ---
 
