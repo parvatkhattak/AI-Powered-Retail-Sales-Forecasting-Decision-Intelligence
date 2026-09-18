@@ -59,3 +59,7 @@ WALKFORWARD_FOLDS = 6
 APP_TITLE       = "Retail AI — Decision Intelligence Platform"
 APP_ICON        = "🛒"
 APP_LAYOUT      = "wide"
+
+# ── Observability & Monitoring ─────────────────────────────────────────────────
+LOG_DIR         = ROOT_DIR / "logs"           # Rotating log + JSONL files go here
+LOG_LEVEL       = os.getenv("LOG_LEVEL", "INFO")  # DEBUG | INFO | WARNING | ERROR

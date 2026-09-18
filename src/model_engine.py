@@ -20,6 +20,15 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DB_PATH, MODEL_PATH, LGBM_PATH, STORE_CSV, FORECAST_DAYS, LAG_DAYS, ROLLING_WINDOWS, USE_MOCKS, MOCK_FORECAST, MOCK_SHAP, WALKFORWARD_FOLDS
 
+# ── Observability (optional — fails silently) ────────────────────────────
+try:
+    from src.observability import timed as _timed
+except Exception:
+    def _timed(name, **kw):  # type: ignore[misc]
+        """No-op fallback when observability module is unavailable."""
+        def decorator(fn): return fn
+        return decorator
+
 import xgboost as xgb
 import lightgbm as lgb
 import shap
@@ -414,6 +423,7 @@ def get_missing_store_info(store_id: int) -> dict | None:
     return {"recent_avg": recent_avg, "dates": pd.to_datetime(window_dates)}
 
 
+@_timed("forecast_7day")
 def get_7day_forecast(store_id: int) -> pd.DataFrame:
     """Returns a 7-row DataFrame: Date, PredictedSales, LowerBound, UpperBound."""
     if USE_MOCKS:
@@ -449,6 +459,7 @@ def get_forecast_calendar(store_id: int) -> pd.DataFrame:
     return ctx["future"][["Date", "Open", "Promo", "StateHoliday", "SchoolHoliday"]].reset_index(drop=True)
 
 
+@_timed("forecast_shap")
 def get_shap_explanations(store_id: int) -> dict:
     """Returns top 5 SHAP drivers: {feature_name: {shap_value, direction}} for
     this store's very next trading day."""

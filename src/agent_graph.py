@@ -54,6 +54,14 @@ from src import validation as dv
 
 logger = logging.getLogger(__name__)
 
+# ── Observability (optional — fails silently if module not present) ────────────
+try:
+    from src.observability import record_llm_call
+    _OBS_ENABLED = True
+except Exception:
+    _OBS_ENABLED = False
+    def record_llm_call(*a, **kw): pass  # type: ignore[misc]
+
 # Progress reporting. The UI shows what the agent is doing and how long it has
 # been doing it, because a silent spinner for several seconds reads as a hang.
 # Thread-local so a background worker reports only to its own listener.
@@ -1244,7 +1252,39 @@ def _compose_with_llm(state: AgentState, context: dict) -> str:
             f"Tool results (the ONLY data you may reference):\n{context_json}"
         )),
     ]
-    return llm.invoke(messages).content
+    # ── Instrumented LLM call ────────────────────────────────────────────
+    import time
+    _t0 = time.perf_counter()
+    _status = "ok"
+    try:
+        response = llm.invoke(messages)
+        return response.content
+    except Exception:
+        _status = "error"
+        raise
+    finally:
+        try:
+            _latency_ms = round((time.perf_counter() - _t0) * 1000, 1)
+            # LangChain stores token usage in response.usage_metadata (dict)
+            _usage = getattr(response, "usage_metadata", None) or {}
+            _prompt_tok  = int(_usage.get("input_tokens",  0))
+            _compl_tok   = int(_usage.get("output_tokens", 0))
+            # Fallback estimate when provider doesn’t return counts
+            if _prompt_tok == 0:
+                _prompt_tok = max(1, sum(len(m.content) for m in messages) // 4)
+            if _compl_tok == 0 and _status == "ok":
+                _compl_tok  = max(1, len(response.content) // 4)
+            record_llm_call(
+                model           = LLM_MODEL,
+                prompt_tokens   = _prompt_tok,
+                completion_tokens = _compl_tok,
+                latency_ms      = _latency_ms,
+                status          = _status,
+                query_preview   = state.get("query", "")[:80],
+            )
+        except Exception:  # pragma: no cover
+            pass  # Observability must never mask the real error
+
 
 
 def _build_grounding(state: AgentState) -> rv.Grounding:

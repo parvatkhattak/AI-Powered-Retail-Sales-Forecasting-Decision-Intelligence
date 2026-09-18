@@ -1,6 +1,13 @@
 import streamlit as st
 from config import APP_TITLE, APP_ICON, APP_LAYOUT
 
+# ── Observability: init structured logging once at startup ─────────────────────
+try:
+    from src.observability import init_observability
+    init_observability()
+except Exception:
+    pass  # Observability must never block app startup
+
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon=APP_ICON,
@@ -22,6 +29,7 @@ with st.sidebar:
         - 🔍 Promotion Analysis
         - 🤖 AI Assistant
         - ⚙️ Model Performance
+        - 📡 Observability
         """
     )
     st.divider()
