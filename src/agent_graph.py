@@ -1256,6 +1256,7 @@ def _compose_with_llm(state: AgentState, context: dict) -> str:
     import time
     _t0 = time.perf_counter()
     _status = "ok"
+    response = None  # guard: finally must not raise UnboundLocalError on error path
     try:
         response = llm.invoke(messages)
         return response.content
@@ -1272,7 +1273,7 @@ def _compose_with_llm(state: AgentState, context: dict) -> str:
             # Fallback estimate when provider doesn’t return counts
             if _prompt_tok == 0:
                 _prompt_tok = max(1, sum(len(m.content) for m in messages) // 4)
-            if _compl_tok == 0 and _status == "ok":
+            if _compl_tok == 0 and _status == "ok" and response is not None:
                 _compl_tok  = max(1, len(response.content) // 4)
             record_llm_call(
                 model           = LLM_MODEL,
